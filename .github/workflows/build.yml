@@ -9,6 +9,19 @@ jobs:
         with: { distribution: temurin, java-version: '17' }
       - uses: gradle/actions/setup-gradle@v3
         with: { gradle-version: '8.7' }
+      - name: Show project files
+        run: find android -type f -not -path '*/drawable-nodpi/*' | sort
+      - name: Make sure settings.gradle exists (phone uploads sometimes drop it)
+        working-directory: android
+        run: |
+          cat > settings.gradle <<'EOF2'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "VoltageIconPack"
+          include ":app"
+          EOF2
+          test -f app/build.gradle || { echo "MISSING android/app/build.gradle - upload it"; exit 1; }
+          test -f app/src/main/AndroidManifest.xml || { echo "MISSING AndroidManifest.xml - upload it"; exit 1; }
       - name: Build debug APK (auto debug-signed, no key needed)
         working-directory: android
         run: gradle assembleDebug
