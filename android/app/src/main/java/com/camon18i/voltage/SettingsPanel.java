@@ -352,7 +352,7 @@ public class SettingsPanel extends FrameLayout {
     void refreshBadgeStatus() {
         if (badgeStatus == null) return;
         boolean on = host.badgeAccess();
-        badgeStatus.setText(on ? "Notification access: ON. Badges are live." : "Notification access: OFF. Tap Allow access, then switch Voltage on.");
+        badgeStatus.setText(on ? "Notification access: ON. Badges are live." : "Notification access: OFF. Tap Allow access, then switch FEG Launcher on.");
         badgeStatus.setTextColor(on ? 0xFF7CE0A0 : 0xFFFFB27A);
     }
 
@@ -380,7 +380,7 @@ public class SettingsPanel extends FrameLayout {
         back.setPadding(dp(6), 0, dp(16), dp(4));
         back.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { host.close(); } });
         head.addView(back);
-        head.addView(text("Voltage settings", 22, Theme.text, true));
+        head.addView(text("FEG Launcher settings", 22, Theme.text, true));
         col.addView(head, new LinearLayout.LayoutParams(-1, -2));
 
         // ---- 1. wallpaper
@@ -468,7 +468,8 @@ public class SettingsPanel extends FrameLayout {
         LinearLayout lay = card(col, "HOME SCREEN LAYOUT");
         seekRow(lay, "Columns", "grid_cols", 3, 6, 4);
         seekRow(lay, "Rows", "grid_rows", 4, 7, 5);
-        note(lay, "Icons reflow on their own. Big icons with many rows may overlap.");
+        toggleRow(lay, "Endless scrolling (pages loop around)", "loop_pages", true);
+        note(lay, "Icons reflow on their own. Big icons with many rows may overlap. Endless scrolling also applies to the drawer's horizontal pages.");
 
         // ---- 6. app drawer
         LinearLayout dr = card(col, "APP DRAWER");
@@ -492,7 +493,7 @@ public class SettingsPanel extends FrameLayout {
         toggleRow(wg, "Lock widgets", "widgets_lock", false);
         seekRow(wg, "Corner radius", "widgets_radius", 0, 32, 0);
         seekRow(wg, "Spacing", "widgets_gap", 0, 12, 4);
-        note(wg, "Resize: tap \u22EE, then Resize. Arrange: long-press a widget and drag it (drop on Remove to delete). Lock stops accidental moves.");
+        note(wg, "Resize: long-press a widget and let go, then drag the white handles (right edge, bottom edge or corner). Remove: tap the red X, or long-press and drag the widget to the top. Tap \u22EE for more. Lock stops accidental moves.");
 
         // ---- 9. dock
         LinearLayout dk = card(col, "DOCK");
@@ -527,7 +528,7 @@ public class SettingsPanel extends FrameLayout {
         badgeStatus.setPadding(0, dp(8), 0, 0);
         bd.addView(badgeStatus, new LinearLayout.LayoutParams(-1, -2));
         refreshBadgeStatus();
-        note(bd, "Badges need notification access. On Android 13+, if the switch is greyed out: Settings > Apps > Voltage > three dots > Allow restricted settings.");
+        note(bd, "Badges need notification access. On Android 13+, if the switch is greyed out: Settings > Apps > FEG Launcher > three dots > Allow restricted settings.");
 
         // ---- 12. animation effects
         LinearLayout an = card(col, "ANIMATION EFFECTS");
@@ -564,9 +565,11 @@ public class SettingsPanel extends FrameLayout {
         toggleRow(lk, "Lock when the screen turns off", "lock_screenoff", true);
         seekRow(lk, "How many numbers", "lock_count", 4, 9, 6);
         seekRow(lk, "Floating speed", "lock_speed", 1, 5, 3);
+        segRow(lk, "Unlock rule", new String[]{"Smallest to biggest", "Biggest to smallest", "Odd numbers", "Even numbers", "Odd, smallest first", "Even, smallest first", "Random (shows hint)"}, "lock_rule", 0);
+        toggleRow(lk, "Show the rule on the lock screen", "lock_hint", false);
         pillIn(lk, "Preview", new Runnable() { public void run() { host.lockPreview(); } });
         pillIn(lk, "Lock now", new Runnable() { public void run() { host.lockNow(); } });
-        note(lk, "Glossy 3D numbers float around. Tap them from the smallest to the biggest; the biggest one unlocks. A wrong tap starts over. This lock covers Voltage only, not other apps or the phone's own lock screen, so keep your normal screen lock on.");
+        note(lk, "Glossy 3D numbers float around. Tap them the way your rule says; nothing on screen tells anyone the rule unless you switch the hint on. A wrong tap starts over. The small white dot at the bottom asks for the phone's own PIN, pattern or password instead (set one in Android settings first). This lock covers FEG Launcher only, not other apps or the phone's own lock screen, so keep your normal screen lock on.");
 
         // ---- 17. hide apps
         LinearLayout hd = card(col, "HIDE APPS");
@@ -579,13 +582,13 @@ public class SettingsPanel extends FrameLayout {
         toggleRow(al, "Protect selected apps", "applock_on", false);
         pillIn(al, "Choose protected apps", new Runnable() { public void run() { host.chooseProtected(); } });
         segRow(al, "Ask again", new String[]{"Every time", "After 1 min", "After 5 min"}, "applock_delay", 0);
-        note(al, "Opening a protected app from Voltage (home, dock, drawer, folders, search) first asks for the number puzzle. It cannot stop the app being opened from notifications, recent apps or another launcher.");
+        note(al, "Opening a protected app from FEG Launcher (home, dock, drawer, folders, search) first asks for the number puzzle. It cannot stop the app being opened from notifications, recent apps or another launcher.");
 
         // ---- 19. backup and restore
         LinearLayout bk = card(col, "BACKUP & RESTORE");
         pillIn(bk, "Save backup to a file", new Runnable() { public void run() { host.backup(); } });
         pillIn(bk, "Restore from a file", new Runnable() { public void run() { host.restore(); } });
-        pillIn(bk, "Reset Voltage to defaults", new Runnable() { public void run() { host.resetAll(); } });
+        pillIn(bk, "Reset FEG Launcher to defaults", new Runnable() { public void run() { host.resetAll(); } });
         note(bk, "The backup holds your home layout, folders, dock, icon style and size, and every setting on this screen. Wallpaper pictures are not included. Widgets come back only if they still exist on the phone.");
 
         // ---- 20. performance and battery
@@ -593,7 +596,7 @@ public class SettingsPanel extends FrameLayout {
         segRow(pf, "Mode", new String[]{"Balanced", "Battery saver", "Smooth"}, "perf_mode", 0);
         toggleRow(pf, "Reduce animations", "reduce_anim", false);
         toggleRow(pf, "Auto battery saver (battery 20% or lower, or phone's power saver)", "auto_saver", true);
-        toggleRow(pf, "Free memory when Voltage is in the background", "trim_mem", true);
+        toggleRow(pf, "Free memory when FEG Launcher is in the background", "trim_mem", true);
         note(pf, "Battery saver switches off page effects, floating icons, tilt parallax and most animations. Smooth ignores the auto saver and keeps every effect on.");
     }
 

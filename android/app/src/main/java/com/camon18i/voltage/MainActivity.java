@@ -61,6 +61,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.VelocityTracker;
+import android.view.ViewConfiguration;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
@@ -104,6 +105,7 @@ public class MainActivity extends Activity {
 
     static class App {
         String label, pkg, cls, key, iconName;
+        int iconRank = 9;                        // how sure the icon match is: 0 exact ... 3 guess
         Bitmap plain;
         ComponentName cn;
         boolean isClock() { return "ic_clock_dyn".equals(iconName); }
@@ -111,6 +113,8 @@ public class MainActivity extends Activity {
     }
 
     static final int T_APP = 0, T_FOLDER = 1, T_WIDGET = 2;
+    /** v3.8: the built-in FEG-PLAY music player is stored as a widget with this special id (it is not an Android widget) */
+    static final int FEG_WID = -2;
 
     /** One thing on the home screen: an app, a folder or a widget. Laid out in order, first-fit. */
     static class Item {
@@ -123,7 +127,7 @@ public class MainActivity extends Activity {
     }
 
     private int COLS = 4, ROWS = 5; // home grid size (settings)
-    private static final int REQ_BIND = 71, REQ_CONFIG = 72, REQ_PICK_WP = 73;
+    private static final int REQ_BIND = 71, REQ_CONFIG = 72, REQ_PICK_WP = 73, REQ_PHONE_PIN = 77;
     private static final int[] DEFAULT_WALLPAPERS = { R.drawable.wallpaper_cross_1, R.drawable.wallpaper_cross_2 };
 
     private PackageManager pm;
@@ -145,7 +149,9 @@ public class MainActivity extends Activity {
     private int widgetRadius = 0, widgetGap = 4, dockCount = 4, dockAlpha = 27, dockRadius = 30, badgeStyle = 0, swipeSens = 3;
     // v3.5: animations, folders, theme, 3D, lock, hide, backup, performance
     private int animOpen, animClose, animScroll, animFolder, animSpeed = 100, folderStyle, folderSize = 100, themeMode;
-    private int fxDepth = 50, lockCount = 6, lockSpeed = 3, applockDelay, perfMode;
+    private int fxDepth = 50, lockCount = 6, lockSpeed = 3, lockRule, applockDelay, perfMode;
+    private boolean lockHint, phonePinBusy;
+    private Runnable lockOk;
     private boolean fxShadows, fxParallax, fxWpScroll, fxFloat, lockOn, lockScreenOff = true, appLock, hideSearch = true;
     private boolean reduceAnim, autoSaver = true, trimMem = true;
     private boolean saverNow = false, resumed = false, awayFlag = false, lockPending = false, lockCancellable = false;
@@ -164,7 +170,7 @@ public class MainActivity extends Activity {
     private Runnable badgeListener;
     private final List<BadgeRef> badgeRefs = new ArrayList<>();
     static class BadgeRef { TextView v; List<String> pkgs; }
-    static final String[] GESTURE_NAMES = {"Nothing", "App drawer", "Search", "Notifications", "Quick settings", "Voltage settings", "Home menu", "Open an app..."};
+    static final String[] GESTURE_NAMES = {"Nothing", "App drawer", "Search", "Notifications", "Quick settings", "FEG Launcher settings", "Home menu", "Open an app..."};
     interface AppPick { void on(App a); }
     private LinearLayout searchExtras, drawerPagesBox;
     private PagerHSV drawerPager;
@@ -174,6 +180,15 @@ public class MainActivity extends Activity {
     private final List<App> shown = new ArrayList<>();
     private final List<Item> items = new ArrayList<>();
     private final List<View> widgetViews = new ArrayList<>();
+
+    // v3.7: endless pages, drag-to-resize widgets, one icon per app
+    private boolean loopPages = true, inCloneZone = false;
+    private Item editWidget;
+    private FrameLayout editFrame;
+    private final Map<Item, View> widgetReal = new HashMap<>();
+    private final List<ImageView> cloneSnaps = new ArrayList<>();
+    private final List<View> cloneSrc = new ArrayList<>();
+    private int lastRank = 9;
 
     private FrameLayout root;
     private PagerHSV pager;
@@ -204,8 +219,11 @@ public class MainActivity extends Activity {
     private final Runnable edgeRun = new Runnable() {
         public void run() {
             if (dragItem == null || edgeDir == 0) return;
-            int np = pager.page() + edgeDir;
-            if (np >= 0 && np < pager.count()) pager.goTo(np);
+            if (pager.looping()) pager.step(edgeDir);
+            else {
+                int np = pager.page() + edgeDir;
+                if (np >= 0 && np < pager.count()) pager.goTo(np);
+            }
             root.postDelayed(this, 900);
         }
     };
@@ -331,6 +349,7 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        FegPlayerScreen.dismissCurrent();
         try { unregisterReceiver(pkgReceiver); } catch (Exception ignored) {}
         try { unregisterReceiver(screenReceiver); } catch (Exception ignored) {}
         if (BadgeService.onChange == badgeListener) BadgeService.onChange = null;
@@ -340,6 +359,7 @@ public class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         rebuildHome(); // refreshes the calendar date
+        if (hasFeg() && FegEngine.get(this).hasPermission()) FegEngine.get(this).loadLibrary(false);
         if (settings != null) settings.refreshBadgeStatus();
         requestBadgeRebind();
         resumed = true;
@@ -352,8 +372,10 @@ public class MainActivity extends Activity {
 
     @Override protected void onNewIntent(Intent i) {
         super.onNewIntent(i);
+        FegPlayerScreen.dismissCurrent();
         if (settingsOpen()) close();
         if (dragItem != null) endDrag();
+        if (editWidget != null) exitWidgetEdit();
         if (drawerOpen) closeDrawer(); else pager.goTo(0);
     }
 
@@ -361,6 +383,7 @@ public class MainActivity extends Activity {
         if (lockView != null) { if (lockCancellable) hideLock(); return; }
         if (settingsOpen()) { close(); return; }
         if (dragItem != null) { endDrag(); return; }
+        if (editWidget != null) { exitWidgetEdit(); return; }
         if (drawerOpen) closeDrawer(); else pager.goTo(0);
     }
 
@@ -397,6 +420,11 @@ public class MainActivity extends Activity {
         }
         if (req == REQ_BACKUP) { if (res == RESULT_OK && data != null && data.getData() != null) writeBackup(data.getData()); return; }
         if (req == REQ_RESTORE) { if (res == RESULT_OK && data != null && data.getData() != null) readRestore(data.getData()); return; }
+        if (req == REQ_PHONE_PIN) {
+            phonePinBusy = false;
+            if (res == RESULT_OK && lockView != null) { Runnable o = lockOk; lockOk = null; hideLock(); if (o != null) o.run(); }
+            return;
+        }
         if (req != REQ_BIND && req != REQ_CONFIG) return;
         int id = pendingWid;
         if (data != null && data.hasExtra(AppWidgetManager.EXTRA_APPWIDGET_ID))
@@ -472,14 +500,17 @@ public class MainActivity extends Activity {
     }
 
     private String iconFor(String pkg, String cls) {
+        lastRank = 9;
         String d = byComp.get(pkg + "/" + cls);
-        if (d == null) d = byPkg.get(pkg);
-        if (d == null) d = kindPkg.get(pkg);
+        if (d != null) lastRank = 0;
+        if (d == null) { d = byPkg.get(pkg); if (d != null) lastRank = 1; }
+        if (d == null) { d = kindPkg.get(pkg); if (d != null) lastRank = 2; }
         if (d == null) {
             String l = pkg.toLowerCase();
             if (l.contains("deskclock")) d = "ic_clock_dyn";
             else if (l.contains("calculator")) d = "ic_calculator";
             else if (l.endsWith(".files") || l.contains("filemanager")) d = "ic_files";
+            if (d != null) lastRank = 3;
         }
         if ("ic_clock".equals(d)) d = "ic_clock_dyn";
         return d;
@@ -492,6 +523,7 @@ public class MainActivity extends Activity {
         apps.clear(); byKey.clear(); cache.clear(); styledCache.clear();
         Intent main = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
         List<ResolveInfo> list = pm.queryIntentActivities(main, 0);
+        Map<String, ResolveInfo> infos = new HashMap<>();
         for (ResolveInfo ri : list) {
             if (ri.activityInfo == null) continue;
             String pkg = ri.activityInfo.packageName;
@@ -504,24 +536,140 @@ public class MainActivity extends Activity {
             CharSequence lab = ri.loadLabel(pm);
             a.label = lab == null ? pkg : lab.toString();
             a.iconName = iconFor(pkg, a.cls);
+            a.iconRank = lastRank;
+            apps.add(a);
+            byKey.put(a.key, a);
+            infos.put(a.key, ri);
+        }
+        Collections.sort(apps, new Comparator<App>() {
+            @Override public int compare(App x, App y) { return x.label.compareToIgnoreCase(y.label); }
+        });
+        uniqueThemedNames();
+        for (App a : apps) {
             if (a.iconName != null && !a.isCal() && !a.isClock()) {
                 Bitmap bm = res(a.iconName);
                 if (bm == null) a.iconName = null; else a.plain = styled(a.iconName, bm);
             }
             if (a.iconName == null) {
+                ResolveInfo ri = infos.get(a.key);
                 a.plain = iconStyle == IconStyler.CLAY ? composeIcon(ri)
                         : IconStyler.tileFromDrawable(ri.loadIcon(pm), iconStyle);
             }
-            apps.add(a);
-            byKey.put(a.key, a);
         }
-        Collections.sort(apps, new Comparator<App>() {
-            @Override public int compare(App x, App y) { return x.label.compareToIgnoreCase(y.label); }
-        });
+        makeIconsDistinct();
         buildDock();
         if (apps.isEmpty() && !old.isEmpty()) return; // query failed: keep the saved layout untouched
         loadItems();
         if (!drawerEnabled) addAllToHome();
+    }
+
+    // ---- v3.7: no two apps share an icon
+
+    /** A themed clay icon belongs to one app only. The best match keeps it, the others get their own icon. */
+    private void uniqueThemedNames() {
+        Map<String, List<App>> by = new HashMap<>();
+        for (App a : apps) {
+            if (a.iconName == null) continue;
+            List<App> l = by.get(a.iconName);
+            if (l == null) { l = new ArrayList<>(); by.put(a.iconName, l); }
+            l.add(a);
+        }
+        for (List<App> l : by.values()) {
+            if (l.size() < 2) continue;
+            App best = l.get(0);
+            for (App a : l) {
+                if (a.iconRank < best.iconRank
+                        || (a.iconRank == best.iconRank && a.label.compareToIgnoreCase(best.label) < 0)) best = a;
+            }
+            for (App a : l) if (a != best) a.iconName = null;
+        }
+    }
+
+    /** Small fingerprint of an icon (12x12 colours) used to spot icons that look the same. */
+    private float[] iconSig(Bitmap b) {
+        final int N = 12;
+        float[] v = new float[N * N * 4];
+        try {
+            Bitmap s = Bitmap.createScaledBitmap(b, N, N, true);
+            int[] px = new int[N * N];
+            s.getPixels(px, 0, N, 0, 0, N, N);
+            if (s != b) s.recycle();
+            for (int i = 0; i < px.length; i++) {
+                int c = px[i];
+                v[i * 4] = Color.alpha(c);
+                v[i * 4 + 1] = Color.red(c);
+                v[i * 4 + 2] = Color.green(c);
+                v[i * 4 + 3] = Color.blue(c);
+            }
+        } catch (Throwable ignored) {}
+        return v;
+    }
+
+    private static float sigDist(float[] a, float[] b) {
+        float t = 0f;
+        for (int i = 0; i < a.length; i++) t += Math.abs(a[i] - b[i]);
+        return t / a.length;
+    }
+
+    /** Apps whose icons still look the same (even if only similar) get a coloured letter tag, so every icon is different. */
+    private void makeIconsDistinct() {
+        final float SAME = 8f; // average difference (0..255) below which two icons count as the same
+        List<float[]> reps = new ArrayList<>();
+        List<List<App>> groups = new ArrayList<>();
+        for (App a : apps) {
+            if (a.plain == null || a.isClock() || a.isCal()) continue;
+            float[] sg = iconSig(a.plain);
+            int g = -1;
+            for (int i = 0; i < reps.size(); i++) if (sigDist(reps.get(i), sg) < SAME) { g = i; break; }
+            if (g < 0) {
+                reps.add(sg);
+                List<App> l = new ArrayList<>();
+                l.add(a);
+                groups.add(l);
+            } else groups.get(g).add(a);
+        }
+        for (List<App> l : groups) {
+            if (l.size() < 2) continue;
+            // the app with a themed clay icon (or the first one) keeps the plain icon
+            int keep = 0;
+            for (int i = 0; i < l.size(); i++) if (l.get(i).iconName != null) { keep = i; break; }
+            int k = 0;
+            for (int i = 0; i < l.size(); i++) {
+                if (i == keep) continue;
+                k++;
+                App a = l.get(i);
+                a.plain = tagged(a.plain, a, k, l.size());
+            }
+        }
+    }
+
+    /** Copy of the icon with a small coloured letter tag in the corner. Each tag in a group has its own colour. */
+    private Bitmap tagged(Bitmap src, App a, int k, int n) {
+        Bitmap out;
+        try { out = src.copy(Bitmap.Config.ARGB_8888, true); } catch (Throwable t) { return src; }
+        if (out == null) return src;
+        Canvas c = new Canvas(out);
+        float W = out.getWidth();
+        float r = W * 0.15f, cx = W * 0.75f, cy = W * 0.73f;
+        float hue = (25f + k * 360f / Math.max(2, n)) % 360f;
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(0x66000000);
+        c.drawCircle(cx, cy + W * 0.012f, r + W * 0.012f, p);
+        p.setColor(Color.HSVToColor(new float[]{hue, 0.75f, 0.9f}));
+        c.drawCircle(cx, cy, r, p);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(W * 0.018f);
+        p.setColor(Color.WHITE);
+        c.drawCircle(cx, cy, r, p);
+        String t = a.label == null || a.label.trim().isEmpty() ? "?" : a.label.trim().substring(0, 1).toUpperCase();
+        Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
+        tp.setColor(Color.WHITE);
+        tp.setTypeface(Typeface.DEFAULT_BOLD);
+        tp.setTextAlign(Paint.Align.CENTER);
+        tp.setTextSize(r * 1.15f);
+        Paint.FontMetrics fm = tp.getFontMetrics();
+        c.drawText(t, cx, cy - (fm.ascent + fm.descent) / 2f, tp);
+        return out;
     }
 
     private Bitmap res(String name) {
@@ -764,7 +912,7 @@ public class MainActivity extends Activity {
                         w.wid = o.optInt("id");
                         w.w = Math.max(1, Math.min(COLS, o.optInt("w", 1)));
                         w.h = Math.max(1, Math.min(ROWS, o.optInt("h", 1)));
-                        if (wm.getAppWidgetInfo(w.wid) != null) items.add(w);
+                        if (w.wid == FEG_WID || wm.getAppWidgetInfo(w.wid) != null) items.add(w);
                         else host.deleteAppWidgetId(w.wid);
                     }
                 }
@@ -781,7 +929,36 @@ public class MainActivity extends Activity {
             for (App a : themed) items.add(appItem(a.key));
             for (App a : rest) items.add(appItem(a.key));
         }
+        // v3.8: FEG-PLAY goes on the home screen once (remove it any time, add it back from Add widget)
+        if (!prefs.getBoolean("feg_added", false)) {
+            prefs.edit().putBoolean("feg_added", true).apply();
+            if (!hasFeg()) items.add(0, newFegItem());
+        }
         saveItems();
+    }
+
+    private boolean hasFeg() {
+        for (Item it : items) if (it.type == T_WIDGET && it.wid == FEG_WID) return true;
+        return false;
+    }
+
+    private Item newFegItem() {
+        Item w = new Item();
+        w.type = T_WIDGET;
+        w.wid = FEG_WID;
+        w.w = Math.min(COLS, 4);
+        w.h = 2;
+        return w;
+    }
+
+    private void addFegWidget() {
+        if (hasFeg()) { toast("FEG-PLAY is already on your home screen"); return; }
+        Item w = newFegItem();
+        int page = pager.page(), last = -1;
+        for (int i = 0; i < items.size(); i++) if (items.get(i).page == page) last = i;
+        items.add(last >= 0 ? last + 1 : items.size(), w);
+        saveItems();
+        rebuildHome();
     }
 
     private void saveItems() {
@@ -902,7 +1079,7 @@ public class MainActivity extends Activity {
         pager.addView(pagesBox, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
         col.addView(pager, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         pager.setOnScrollChangeListener(new View.OnScrollChangeListener() {
-            @Override public void onScrollChange(View v, int x, int y, int ox, int oy) { updateDots(); applyScrollFx(x); }
+            @Override public void onScrollChange(View v, int x, int y, int ox, int oy) { updateDots(); applyScrollFx(x); checkCloneZone(x); }
         });
         pager.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
             @Override public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
@@ -924,6 +1101,17 @@ public class MainActivity extends Activity {
         col.addView(dock, dlp);
 
         root.addView(col, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // faint watermark, bottom left of the home screen
+        TextView wm = new TextView(this);
+        wm.setText("feg-tech");
+        wm.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9);
+        wm.setTextColor(0x47FFFFFF);
+        wm.setLetterSpacing(0.08f);
+        wm.setShadowLayer(2, 0, 1, 0x40000000);
+        FrameLayout.LayoutParams wlp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.START);
+        wlp.setMargins(dp(16), 0, 0, dp(3));
+        root.addView(wm, wlp);
 
         // ---- drawer
         drawer = new FrameLayout(this);
@@ -1041,7 +1229,7 @@ public class MainActivity extends Activity {
             @Override public void restore() { restoreSettings(); }
             @Override public void resetAll() { MainActivity.this.resetAll(); }
             @Override public void lockNow() { MainActivity.this.close(); showMainLock(); }
-            @Override public void lockPreview() { showLock("Preview: tap smallest to biggest", lockCount, true, null); }
+            @Override public void lockPreview() { showLock("Preview", lockCount, true, null); }
             @Override public int geti(String k, int d) { return prefs.getInt(k, d); }
             @Override public boolean getb(String k, boolean d) { return prefs.getBoolean(k, d); }
             @Override public void puti(String k, int v) { prefs.edit().putInt(k, v).apply(); onSetting(k); }
@@ -1188,6 +1376,8 @@ public class MainActivity extends Activity {
         b.setTypeface(Typeface.DEFAULT_BOLD);
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
         b.setIncludeFontPadding(false);
+        // icons can have a shadow height (3D effects); the badge must sit higher than that so it is drawn in front of the icon
+        b.setElevation(dp(2 + fxDepth * 0.10f) + dp(8));
         GradientDrawable g = new GradientDrawable();
         g.setColor(0xFFFF3B30);
         g.setCornerRadius(dp(10));
@@ -1289,107 +1479,61 @@ public class MainActivity extends Activity {
     private float cellW() { return (screenW - 2 * pagePad()) / COLS; }
     private float cellH() { return pager.getHeight() / (float) ROWS; }
 
+    private FrameLayout newHomePage() {
+        FrameLayout page = new FrameLayout(this);
+        page.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override public boolean onLongClick(View v) { homeMenu(); return true; }
+        });
+        page.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { exitWidgetEdit(); }
+        });
+        return page;
+    }
+
     private void rebuildHome() {
         if (pagesBox == null || pager.getHeight() <= 0 || dragItem != null) return;
+        if (editWidget != null && !items.contains(editWidget)) editWidget = null;
         int curPage = pager.page();
         pagesBox.removeAllViews();
         widgetViews.clear();
+        widgetReal.clear();
+        cloneSnaps.clear();
+        cloneSrc.clear();
+        inCloneZone = false;
+        editFrame = null;
         badgeRefs.clear();
         floatViews.clear();
         int pageCount = place();
+        final boolean loop = loopPages && pageCount > 1;
         float cw = cellW(), ch = cellH(), pad = pagePad();
 
+        // endless pages: a copy of the last page sits before the first, a copy of the first after the last
         List<FrameLayout> pages = new ArrayList<>();
+        FrameLayout cloneLast = null, cloneFirst = null;
+        if (loop) {
+            cloneLast = newHomePage();
+            pagesBox.addView(cloneLast, new LinearLayout.LayoutParams(screenW, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
         for (int p = 0; p < pageCount; p++) {
-            FrameLayout page = new FrameLayout(this);
-            page.setOnLongClickListener(new View.OnLongClickListener() {
-                @Override public boolean onLongClick(View v) { homeMenu(); return true; }
-            });
+            FrameLayout page = newHomePage();
             pagesBox.addView(page, new LinearLayout.LayoutParams(screenW, ViewGroup.LayoutParams.MATCH_PARENT));
             pages.add(page);
         }
-
-        for (final Item it : items) {
-            FrameLayout page = pages.get(it.page);
-            int left = (int) (pad + it.col * cw), top = (int) (it.row * ch);
-            if (it.type == T_WIDGET) {
-                AppWidgetProviderInfo info = wm.getAppWidgetInfo(it.wid);
-                if (info == null) continue;
-                int gap = dp(widgetGap);
-                int wpx = (int) (it.w * cw) - 2 * gap, hpx = (int) (it.h * ch) - 2 * gap;
-                AppWidgetHostView hv;
-                try { hv = host.createView(this, it.wid, info); } catch (Exception e) { continue; }
-                float dens = getResources().getDisplayMetrics().density;
-                int wdp = (int) (wpx / dens), hdp = (int) (hpx / dens);
-                try { hv.updateAppWidgetSize(null, wdp, hdp, wdp, hdp); } catch (Exception ignored) {}
-                hv.setOnLongClickListener(new View.OnLongClickListener() {
-                    @Override public boolean onLongClick(View v) {
-                        if (widgetsLocked) { toast("Widgets are locked (Voltage settings > Widgets)"); return true; }
-                        startDrag(it, v);
-                        return true;
-                    }
-                });
-                if (widgetRadius > 0) {
-                    final int rr = dp(widgetRadius);
-                    hv.setOutlineProvider(new ViewOutlineProvider() {
-                        @Override public void getOutline(View view, Outline o) { o.setRoundRect(0, 0, view.getWidth(), view.getHeight(), rr); }
-                    });
-                    hv.setClipToOutline(true);
-                }
-                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(wpx, hpx);
-                lp.leftMargin = left + gap;
-                lp.topMargin = top + gap;
-                page.addView(hv, lp);
-                widgetViews.add(hv);
-
-                if (!widgetsMenuBtn || widgetsLocked) continue;
-                TextView menu = new TextView(this);
-                menu.setText("\u22EE");
-                menu.setTextColor(Color.WHITE);
-                menu.setGravity(Gravity.CENTER);
-                menu.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-                GradientDrawable mg = new GradientDrawable();
-                mg.setShape(GradientDrawable.OVAL);
-                mg.setColor(0x88000000);
-                menu.setBackground(mg);
-                menu.setOnClickListener(new View.OnClickListener() {
-                    @Override public void onClick(View v) { widgetMenu(it); }
-                });
-                FrameLayout.LayoutParams mlp = new FrameLayout.LayoutParams(dp(28), dp(28));
-                mlp.leftMargin = left + gap + wpx - dp(32);
-                mlp.topMargin = top + gap + dp(4);
-                page.addView(menu, mlp);
-                continue;
-            }
-
-            View cell;
-            if (it.type == T_APP) {
-                final App a = byKey.get(it.key);
-                if (a == null) continue;
-                cell = makeCell(a, true);
-                cell.setOnClickListener(new View.OnClickListener() {
-                    @Override public void onClick(View v) { launch(a, v); }
-                });
-            } else {
-                cell = makeFolderCell(it);
-                cell.setOnClickListener(new View.OnClickListener() {
-                    @Override public void onClick(View v) { showFolder(it); }
-                });
-            }
-            cell.setOnLongClickListener(new View.OnLongClickListener() {
-                @Override public boolean onLongClick(View v) { startDrag(it, v); return true; }
-            });
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams((int) cw, (int) ch);
-            lp.leftMargin = left;
-            lp.topMargin = top;
-            page.addView(cell, lp);
-            floatViews.add(cell);
+        if (loop) {
+            cloneFirst = newHomePage();
+            pagesBox.addView(cloneFirst, new LinearLayout.LayoutParams(screenW, ViewGroup.LayoutParams.MATCH_PARENT));
         }
 
-        pager.setPages(pageCount, screenW);
+        for (final Item it : items) {
+            addHomeItem(pages.get(it.page), it, cw, ch, pad, false);
+            if (loop && it.page == pageCount - 1) addHomeItem(cloneLast, it, cw, ch, pad, true);
+            if (loop && it.page == 0) addHomeItem(cloneFirst, it, cw, ch, pad, true);
+        }
+
+        pager.setPages(pageCount, screenW, loop);
         try { if (wpm != null) wpm.setWallpaperOffsetSteps(pageCount > 1 ? 1f / (pageCount - 1) : 1f, 1f); } catch (Exception ignored) {}
         final int target = Math.min(curPage, pageCount - 1);
-        pager.post(new Runnable() { public void run() { pager.goToNow(target); updateDots(); applyScrollFx(pager.getScrollX()); } });
+        pager.post(new Runnable() { public void run() { pager.goToNow(target); updateDots(); applyScrollFx(pager.getScrollX()); refreshCloneSnaps(); } });
 
         dock.removeAllViews();
         for (final App a : dockApps) {
@@ -1401,6 +1545,266 @@ public class MainActivity extends Activity {
             dock.addView(cell, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         }
         updateDots();
+    }
+
+    private void addHomeItem(FrameLayout page, final Item it, float cw, float ch, float pad, boolean clone) {
+        int left = (int) (pad + it.col * cw), top = (int) (it.row * ch);
+        if (it.type == T_WIDGET) { addHomeWidget(page, it, left, top, cw, ch, clone); return; }
+        View cell;
+        if (it.type == T_APP) {
+            final App a = byKey.get(it.key);
+            if (a == null) return;
+            cell = makeCell(a, true);
+            cell.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { launch(a, v); }
+            });
+        } else {
+            cell = makeFolderCell(it);
+            cell.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { showFolder(it); }
+            });
+        }
+        cell.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override public boolean onLongClick(View v) { startDrag(it, v); return true; }
+        });
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams((int) cw, (int) ch);
+        lp.leftMargin = left;
+        lp.topMargin = top;
+        page.addView(cell, lp);
+        floatViews.add(cell);
+    }
+
+    private void roundWidgetView(View v) {
+        if (widgetRadius <= 0) return;
+        final int rr = dp(widgetRadius);
+        v.setOutlineProvider(new ViewOutlineProvider() {
+            @Override public void getOutline(View view, Outline o) { o.setRoundRect(0, 0, view.getWidth(), view.getHeight(), rr); }
+        });
+        v.setClipToOutline(true);
+    }
+
+    private void addHomeWidget(FrameLayout page, final Item it, int left, int top, float cw, float ch, boolean clone) {
+        final boolean feg = it.wid == FEG_WID;
+        AppWidgetProviderInfo info = feg ? null : wm.getAppWidgetInfo(it.wid);
+        if (info == null && !feg) return;
+        int gap = dp(widgetGap);
+        int wpx = (int) (it.w * cw) - 2 * gap, hpx = (int) (it.h * ch) - 2 * gap;
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(wpx, hpx);
+        lp.leftMargin = left + gap;
+        lp.topMargin = top + gap;
+        if (clone) {
+            // the copy used while pages wrap around is a picture of the real widget (a widget can only live in one view)
+            ImageView snap = new ImageView(this);
+            snap.setScaleType(ImageView.ScaleType.FIT_XY);
+            roundWidgetView(snap);
+            View src = widgetReal.get(it);
+            if (src != null) { cloneSnaps.add(snap); cloneSrc.add(src); }
+            page.addView(snap, lp);
+        } else {
+            View hv;
+            if (feg) {
+                hv = new FegPlayerView(this, it.h);
+            } else {
+                AppWidgetHostView ahv;
+                try { ahv = host.createView(this, it.wid, info); } catch (Exception e) { return; }
+                float dens = getResources().getDisplayMetrics().density;
+                int wdp = (int) (wpx / dens), hdp = (int) (hpx / dens);
+                try { ahv.updateAppWidgetSize(null, wdp, hdp, wdp, hdp); } catch (Exception ignored) {}
+                hv = ahv;
+            }
+            roundWidgetView(hv);
+            final WidgetShell shell = new WidgetShell(this);
+            shell.setOnLP(new Runnable() {
+                public void run() {
+                    if (widgetsLocked) { toast("Widgets are locked (FEG Launcher settings > Widgets)"); return; }
+                    startDrag(it, shell);
+                }
+            });
+            shell.addView(hv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            page.addView(shell, lp);
+            widgetViews.add(shell);
+            widgetReal.put(it, shell);
+        }
+
+        if (widgetsMenuBtn && !widgetsLocked) {
+            TextView menu = new TextView(this);
+            menu.setText("\u22EE");
+            menu.setTextColor(Color.WHITE);
+            menu.setGravity(Gravity.CENTER);
+            menu.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            GradientDrawable mg = new GradientDrawable();
+            mg.setShape(GradientDrawable.OVAL);
+            mg.setColor(0x88000000);
+            menu.setBackground(mg);
+            menu.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { widgetMenu(it); }
+            });
+            FrameLayout.LayoutParams mlp = new FrameLayout.LayoutParams(dp(28), dp(28));
+            mlp.leftMargin = left + gap + wpx - dp(32);
+            mlp.topMargin = top + gap + dp(4);
+            page.addView(menu, mlp);
+        }
+        if (!clone && it == editWidget && !widgetsLocked) addWidgetEditFrame(page, it, left + gap, top + gap, wpx, hpx, cw, ch, gap);
+    }
+
+    // ---- v3.7: widget edit frame (drag the handles to resize)
+
+    private void addWidgetEditFrame(FrameLayout page, final Item it, int left, int top, int wpx, int hpx, float cw, float ch, int gap) {
+        final FrameLayout frame = new FrameLayout(this);
+        GradientDrawable border = new GradientDrawable();
+        border.setColor(0x00000000);
+        border.setStroke(dp(2), 0xFFFFFFFF);
+        border.setCornerRadius(dp(Math.max(8, widgetRadius)));
+        frame.setBackground(border);
+        View shell = widgetReal.get(it);
+        frame.addView(resizeHandle(1, it, frame, shell, cw, ch, gap));
+        frame.addView(resizeHandle(2, it, frame, shell, cw, ch, gap));
+        frame.addView(resizeHandle(3, it, frame, shell, cw, ch, gap));
+
+        TextView x = new TextView(this);
+        x.setText("\u2715");
+        x.setTextColor(Color.WHITE);
+        x.setGravity(Gravity.CENTER);
+        x.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        GradientDrawable xg = new GradientDrawable();
+        xg.setShape(GradientDrawable.OVAL);
+        xg.setColor(0xFFE53935);
+        xg.setStroke(dp(2), Color.WHITE);
+        x.setBackground(xg);
+        x.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { editWidget = null; removeItem(it); }
+        });
+        FrameLayout.LayoutParams xlp = new FrameLayout.LayoutParams(dp(30), dp(30), Gravity.TOP | Gravity.START);
+        xlp.setMargins(dp(6), dp(6), 0, 0);
+        frame.addView(x, xlp);
+
+        FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(wpx, hpx);
+        flp.leftMargin = left;
+        flp.topMargin = top;
+        page.addView(frame, flp);
+        editFrame = frame;
+    }
+
+    /** mode 1 = right edge, 2 = bottom edge, 3 = corner. Dragging snaps to whole grid cells. */
+    private View resizeHandle(final int mode, final Item it, final FrameLayout frame, final View shell, final float cw, final float ch, final int gap) {
+        FrameLayout box = new FrameLayout(this);
+        View dot = new View(this);
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(0xFFFFFFFF);
+        g.setStroke(dp(2), 0xFF2979FF);
+        FrameLayout.LayoutParams dlp, blp;
+        if (mode == 1) {
+            g.setCornerRadius(dp(4));
+            dlp = new FrameLayout.LayoutParams(dp(8), dp(34), Gravity.CENTER);
+            blp = new FrameLayout.LayoutParams(dp(36), dp(60), Gravity.END | Gravity.CENTER_VERTICAL);
+        } else if (mode == 2) {
+            g.setCornerRadius(dp(4));
+            dlp = new FrameLayout.LayoutParams(dp(34), dp(8), Gravity.CENTER);
+            blp = new FrameLayout.LayoutParams(dp(60), dp(36), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        } else {
+            g.setShape(GradientDrawable.OVAL);
+            dlp = new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER);
+            blp = new FrameLayout.LayoutParams(dp(44), dp(44), Gravity.BOTTOM | Gravity.END);
+        }
+        dot.setBackground(g);
+        box.addView(dot, dlp);
+        box.setLayoutParams(blp);
+        box.setOnTouchListener(new View.OnTouchListener() {
+            float sx, sy;
+            int sw, sh, curW, curH;
+            @Override public boolean onTouch(View v, MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        sx = e.getRawX(); sy = e.getRawY();
+                        sw = it.w; sh = it.h; curW = it.w; curH = it.h;
+                        if (v.getParent() != null) v.getParent().requestDisallowInterceptTouchEvent(true);
+                        return true;
+                    case MotionEvent.ACTION_MOVE: {
+                        int nw = sw, nh = sh;
+                        if (mode == 1 || mode == 3) nw = clampi(Math.round(sw + (e.getRawX() - sx) / cw), 1, Math.max(1, COLS - it.col));
+                        if (mode == 2 || mode == 3) nh = clampi(Math.round(sh + (e.getRawY() - sy) / ch), 1, Math.max(1, ROWS - it.row));
+                        if (nw != curW || nh != curH) {
+                            curW = nw; curH = nh;
+                            liveResize(frame, shell, nw, nh, cw, ch, gap);
+                            v.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);
+                        }
+                        return true;
+                    }
+                    case MotionEvent.ACTION_UP:
+                    case MotionEvent.ACTION_CANCEL:
+                        if (curW != it.w || curH != it.h) {
+                            it.w = curW; it.h = curH;
+                            saveItems();
+                            rebuildHome();
+                        }
+                        return true;
+                    default: return true;
+                }
+            }
+        });
+        return box;
+    }
+
+    private void liveResize(FrameLayout frame, View shell, int nw, int nh, float cw, float ch, int gap) {
+        int wpx = (int) (nw * cw) - 2 * gap, hpx = (int) (nh * ch) - 2 * gap;
+        ViewGroup.LayoutParams fl = frame.getLayoutParams();
+        fl.width = wpx; fl.height = hpx;
+        frame.setLayoutParams(fl);
+        if (shell == null) return;
+        ViewGroup.LayoutParams sl = shell.getLayoutParams();
+        sl.width = wpx; sl.height = hpx;
+        shell.setLayoutParams(sl);
+        if (shell instanceof ViewGroup && ((ViewGroup) shell).getChildCount() > 0) {
+            View c = ((ViewGroup) shell).getChildAt(0);
+            if (c instanceof AppWidgetHostView) {
+                float dens = getResources().getDisplayMetrics().density;
+                int wdp = (int) (wpx / dens), hdp = (int) (hpx / dens);
+                try { ((AppWidgetHostView) c).updateAppWidgetSize(null, wdp, hdp, wdp, hdp); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    private void enterWidgetEdit(Item w) {
+        if (widgetsLocked) { toast("Widgets are locked (FEG Launcher settings > Widgets)"); return; }
+        editWidget = w;
+        rebuildHome();
+        toast("Drag the white handles to resize. Drag the widget to the top to remove it.");
+    }
+
+    private boolean exitWidgetEdit() {
+        if (editWidget == null) return false;
+        editWidget = null;
+        editFrame = null;
+        rebuildHome();
+        return true;
+    }
+
+    /** Takes the edit frame off the screen without rebuilding (used when a drag starts). */
+    private void dropEditFrame() {
+        editWidget = null;
+        if (editFrame != null && editFrame.getParent() instanceof ViewGroup) ((ViewGroup) editFrame.getParent()).removeView(editFrame);
+        editFrame = null;
+    }
+
+    // ---- endless pages: copies of widgets are pictures, refreshed when they are about to be seen
+
+    private void checkCloneZone(int x) {
+        boolean z = pager != null && pager.looping() && (x < screenW || x > pager.count() * screenW);
+        if (z && !inCloneZone) refreshCloneSnaps();
+        inCloneZone = z;
+    }
+
+    private void refreshCloneSnaps() {
+        for (int i = 0; i < cloneSnaps.size(); i++) {
+            View src = cloneSrc.get(i);
+            int w = src.getWidth(), h = src.getHeight();
+            if (w <= 0 || h <= 0) continue;
+            try {
+                Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                src.draw(new Canvas(b));
+                cloneSnaps.get(i).setImageBitmap(b);
+            } catch (Throwable ignored) {}
+        }
     }
 
     private void updateDots() {
@@ -1492,7 +1896,7 @@ public class MainActivity extends Activity {
     }
 
     private void homeMenu() {
-        final String[] arr = {"Voltage settings", "Add widget", drawerEnabled ? "Open all apps" : "Search", "Phone settings"};
+        final String[] arr = {"FEG Launcher settings", "Add widget", drawerEnabled ? "Open all apps" : "Search", "Phone settings"};
         new AlertDialog.Builder(this).setItems(arr, new DialogInterface.OnClickListener() {
             @Override public void onClick(DialogInterface d, int w) {
                 try {
@@ -1524,6 +1928,7 @@ public class MainActivity extends Activity {
     private boolean settingsOpen() { return settings != null && settings.getVisibility() == View.VISIBLE; }
 
     private void openSettings() {
+        if (editWidget != null) exitWidgetEdit();
         if (drawerOpen) hideDrawerNow();
         settings.scrollToTop();
         settings.refreshStyles();
@@ -1604,7 +2009,7 @@ public class MainActivity extends Activity {
         new Thread(new Runnable() {
             public void run() {
                 Bitmap base = WallpaperHelper.decodeFile(wpBase(), 4000);
-                if (base == null) { toast("Choose a wallpaper from Voltage first"); return; }
+                if (base == null) { toast("Choose a wallpaper from FEG Launcher first"); return; }
                 Bitmap out = WallpaperHelper.blur(base, pct);
                 if (!WallpaperHelper.apply(MainActivity.this, out)) toast("Couldn't set wallpaper");
             }
@@ -1714,6 +2119,7 @@ public class MainActivity extends Activity {
                 break;
             case "drawer_cols": drawerCols = clampi(prefs.getInt(k, 4), 3, 6); applyDrawerConfig(); filter(search.getText().toString()); break;
             case "drawer_scroll": drawerScroll = clampi(prefs.getInt(k, 0), 0, 2); applyDrawerConfig(); filter(search.getText().toString()); break;
+            case "loop_pages": loopPages = prefs.getBoolean(k, true); rebuildHome(); if (drawerScroll == 2) rebuildDrawerPages(); break;
             case "widgets_menu": widgetsMenuBtn = prefs.getBoolean(k, true); rebuildHome(); break;
             case "widgets_lock": widgetsLocked = prefs.getBoolean(k, false); rebuildHome(); break;
             case "widgets_radius": widgetRadius = clampi(prefs.getInt(k, 0), 0, 32); rebuildHome(); break;
@@ -1747,6 +2153,8 @@ public class MainActivity extends Activity {
             case "lock_screenoff": lockScreenOff = prefs.getBoolean(k, true); break;
             case "lock_count": lockCount = clampi(prefs.getInt(k, 6), 4, 9); break;
             case "lock_speed": lockSpeed = clampi(prefs.getInt(k, 3), 1, 5); break;
+            case "lock_rule": lockRule = clampi(prefs.getInt(k, 0), 0, 6); break;
+            case "lock_hint": lockHint = prefs.getBoolean(k, false); break;
             case "hide_search": hideSearch = prefs.getBoolean(k, true); filter(search.getText().toString()); break;
             case "applock_on": appLock = prefs.getBoolean(k, false); break;
             case "applock_delay": applockDelay = clampi(prefs.getInt(k, 0), 0, 2); break;
@@ -1764,6 +2172,7 @@ public class MainActivity extends Activity {
     }
 
     private void loadExtraPrefs() {
+        loopPages = prefs.getBoolean("loop_pages", true);
         widgetsMenuBtn = prefs.getBoolean("widgets_menu", true);
         widgetsLocked = prefs.getBoolean("widgets_lock", false);
         widgetRadius = clampi(prefs.getInt("widgets_radius", 0), 0, 32);
@@ -1793,6 +2202,8 @@ public class MainActivity extends Activity {
         lockScreenOff = prefs.getBoolean("lock_screenoff", true);
         lockCount = clampi(prefs.getInt("lock_count", 6), 4, 9);
         lockSpeed = clampi(prefs.getInt("lock_speed", 3), 1, 5);
+        lockRule = clampi(prefs.getInt("lock_rule", 0), 0, 6);
+        lockHint = prefs.getBoolean("lock_hint", false);
         hideSearch = prefs.getBoolean("hide_search", true);
         appLock = prefs.getBoolean("applock_on", false);
         applockDelay = clampi(prefs.getInt("applock_delay", 0), 0, 2);
@@ -1903,7 +2314,7 @@ public class MainActivity extends Activity {
             }
         }
         if (fxWpScroll && wpm != null && pager.count() > 1) {
-            try { wpm.setWallpaperOffsets(root.getWindowToken(), Math.max(0f, Math.min(1f, x / (float) ((pager.count() - 1) * screenW))), 0.5f); }
+            try { wpm.setWallpaperOffsets(root.getWindowToken(), Math.max(0f, Math.min(1f, (x / (float) screenW - (pager.looping() ? 1 : 0)) / (pager.count() - 1))), 0.5f); }
             catch (Exception ignored) {}
         }
     }
@@ -2045,9 +2456,11 @@ public class MainActivity extends Activity {
         if (lockView != null) return;
         if (drawerOpen) hideDrawerNow();
         lockCancellable = cancellable;
-        lockView = new LockView(this, count, lockSpeed, title, saverNow,
+        lockOk = ok;
+        lockView = new LockView(this, count, lockSpeed, lockRule, lockHint, title, saverNow,
                 new Runnable() { public void run() { hideLock(); if (ok != null) ok.run(); } },
-                cancellable ? new Runnable() { public void run() { hideLock(); } } : null);
+                cancellable ? new Runnable() { public void run() { hideLock(); } } : null,
+                new Runnable() { public void run() { phonePinUnlock(); } });
         root.addView(lockView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         lockView.setAlpha(0f);
         lockView.animate().alpha(1f).setDuration(dur(200)).start();
@@ -2062,8 +2475,19 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** The white dot on the number lock: asks for the phone's own PIN, pattern or password instead. */
+    private void phonePinUnlock() {
+        if (phonePinBusy) return;
+        android.app.KeyguardManager km = (android.app.KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        if (km == null || !km.isDeviceSecure()) { toast("Set a PIN, pattern or password in Android settings first"); return; }
+        Intent i = km.createConfirmDeviceCredentialIntent("FEG Launcher", "Enter your phone lock to unlock FEG Launcher");
+        if (i == null) { toast("Set a PIN, pattern or password in Android settings first"); return; }
+        try { phonePinBusy = true; startActivityForResult(i, REQ_PHONE_PIN); }
+        catch (Exception e) { phonePinBusy = false; toast("Couldn't open the phone lock"); }
+    }
+
     private void showMainLock() {
-        showLock("Tap the numbers: smallest to biggest", lockCount, false, new Runnable() { public void run() { lockPending = false; } });
+        showLock("", lockCount, false, new Runnable() { public void run() { lockPending = false; } });
     }
 
     private boolean unlockedRecently(App a) {
@@ -2098,7 +2522,7 @@ public class MainActivity extends Activity {
         hiddenPkgs.add(a.pkg);
         savePkgSet(hiddenPkgs, "hidden_pkgs");
         applyHidden();
-        toast(a.label + " hidden. Bring it back in Voltage settings > Hide apps");
+        toast(a.label + " hidden. Bring it back in FEG Launcher settings > Hide apps");
     }
 
     private void applyHidden() {
@@ -2175,7 +2599,7 @@ public class MainActivity extends Activity {
             while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
             in.close();
             final JSONObject doc = new JSONObject(bo.toString("UTF-8"));
-            if (!"voltage".equals(doc.optString("app")) || doc.optJSONObject("prefs") == null) { toast("That is not a Voltage backup"); return; }
+            if (!"voltage".equals(doc.optString("app")) || doc.optJSONObject("prefs") == null) { toast("That is not a FEG Launcher backup"); return; }
             new AlertDialog.Builder(this).setTitle("Restore backup?")
                     .setMessage("This replaces your current layout, folders and settings.")
                     .setPositiveButton("Restore", new DialogInterface.OnClickListener() {
@@ -2217,7 +2641,7 @@ public class MainActivity extends Activity {
     }
 
     private void resetAll() {
-        new AlertDialog.Builder(this).setTitle("Reset Voltage?")
+        new AlertDialog.Builder(this).setTitle("Reset FEG Launcher?")
                 .setMessage("Layout, folders, dock and every setting go back to defaults. Make a backup first if unsure.")
                 .setPositiveButton("Reset", new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface d, int w) {
@@ -2287,7 +2711,7 @@ public class MainActivity extends Activity {
     private boolean emptyHomeSpot(MotionEvent e) {
         float x = e.getRawX(), y = e.getRawY();
         if (!hit(pager, x, y)) return false;
-        View pg = pagesBox.getChildAt(pager.page());
+        View pg = pagesBox.getChildAt(pager.physical());
         if (!(pg instanceof ViewGroup)) return false;
         ViewGroup g = (ViewGroup) pg;
         for (int i = 0; i < g.getChildCount(); i++) if (hit(g.getChildAt(i), x, y)) return false;
@@ -2304,6 +2728,7 @@ public class MainActivity extends Activity {
 
     private void startDrag(Item it, View v) {
         if (dragItem != null) return;
+        dropEditFrame();
         dragItem = it;
         dragIdx = items.indexOf(it);
         dragView = v;
@@ -2325,8 +2750,8 @@ public class MainActivity extends Activity {
         moveGhost();
         v.setVisibility(View.INVISIBLE);
 
-        tInfo.setVisibility(it.type == T_APP ? View.VISIBLE : View.INVISIBLE);
-        tUninstall.setVisibility(it.type == T_APP ? View.VISIBLE : View.INVISIBLE);
+        tInfo.setVisibility(it.type == T_APP ? View.VISIBLE : View.GONE);
+        tUninstall.setVisibility(it.type == T_APP ? View.VISIBLE : View.GONE);
         targetBar.setVisibility(View.VISIBLE);
         v.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
     }
@@ -2341,10 +2766,13 @@ public class MainActivity extends Activity {
 
     private int targetUnder() {
         if (targetBar.getVisibility() != View.VISIBLE) return 0;
-        if (hit(tRemove, lastX, lastY)) return 1;
-        if (dragItem.type == T_APP && hit(tInfo, lastX, lastY)) return 2;
-        if (dragItem.type == T_APP && hit(tUninstall, lastX, lastY)) return 3;
-        return 0;
+        int[] l = new int[2];
+        targetBar.getLocationOnScreen(l);
+        // the bar itself (plus a hair of slack); a finger above it still counts
+        if (lastY > l[1] + targetBar.getHeight() + dp(6)) return 0;
+        if (dragItem.type != T_APP) return 1; // widgets and folders: the whole strip is Remove
+        float third = screenW / 3f;
+        return lastX < third ? 1 : (lastX < 2 * third ? 2 : 3);
     }
 
     private void dragMove() {
@@ -2388,7 +2816,7 @@ public class MainActivity extends Activity {
         if (!moved) {
             if (a != null) appMenu(a, false, true);
             else if (it.type == T_FOLDER) folderMenu(it);
-            else if (it.type == T_WIDGET) widgetMenu(it);
+            else if (it.type == T_WIDGET) enterWidgetEdit(it);
             return;
         }
         if (cell == null) return; // dropped outside the grid: nothing changes
@@ -2402,9 +2830,12 @@ public class MainActivity extends Activity {
         float ry = lastY - loc[1];
         if (ry < 0 || ry > pager.getHeight() || lastX < loc[0] || lastX > loc[0] + pager.getWidth()) return null;
         float rx = lastX - loc[0] + pager.getScrollX();
-        int page = (int) (rx / screenW);
-        if (page < 0 || page >= pager.count()) return null;
-        float inX = rx - page * screenW - pagePad();
+        int phys = (int) (rx / screenW);
+        int cnt = pager.count();
+        int page = phys - (pager.looping() ? 1 : 0);
+        if (pager.looping()) page = ((page % cnt) + cnt) % cnt;
+        if (page < 0 || page >= cnt) return null;
+        float inX = rx - phys * screenW - pagePad();
         float cx = inX / cellW(), cy = ry / cellH();
         int col = Math.max(0, Math.min(COLS - 1, (int) Math.floor(cx)));
         int row = Math.max(0, Math.min(ROWS - 1, (int) Math.floor(cy)));
@@ -2466,7 +2897,7 @@ public class MainActivity extends Activity {
     private void removeItem(Item it) {
         if (needsDrawerToRemove(it)) return;
         items.remove(it);
-        if (it.type == T_WIDGET) host.deleteAppWidgetId(it.wid);
+        if (it.type == T_WIDGET && it.wid != FEG_WID) host.deleteAppWidgetId(it.wid);
         if (!drawerEnabled) addAllToHome();
         saveItems();
         rebuildHome();
@@ -2577,7 +3008,6 @@ public class MainActivity extends Activity {
 
     private void pickWidget() {
         final List<AppWidgetProviderInfo> list = new ArrayList<>(wm.getInstalledProviders());
-        if (list.isEmpty()) { Toast.makeText(this, "No widgets available", Toast.LENGTH_SHORT).show(); return; }
         final Map<AppWidgetProviderInfo, String> names = new HashMap<>();
         for (AppWidgetProviderInfo p : list) {
             String label;
@@ -2591,10 +3021,13 @@ public class MainActivity extends Activity {
                 return names.get(x).compareToIgnoreCase(names.get(y));
             }
         });
-        String[] arr = new String[list.size()];
-        for (int i = 0; i < arr.length; i++) arr[i] = names.get(list.get(i));
+        String[] arr = new String[list.size() + 1];
+        arr[0] = "FEG-PLAY - music player";
+        for (int i = 1; i < arr.length; i++) arr[i] = names.get(list.get(i - 1));
         new AlertDialog.Builder(this).setTitle("Add widget").setItems(arr, new DialogInterface.OnClickListener() {
-            @Override public void onClick(DialogInterface d, int w) { bindWidget(list.get(w)); }
+            @Override public void onClick(DialogInterface d, int w) {
+                if (w == 0) addFegWidget(); else bindWidget(list.get(w - 1));
+            }
         }).show();
     }
 
@@ -2636,21 +3069,22 @@ public class MainActivity extends Activity {
     }
 
     private void widgetMenu(final Item w) {
-        if (widgetsLocked) { toast("Widgets are locked (Voltage settings > Widgets)"); return; }
-        final String[] arr = {"Resize...", "Move earlier", "Move later", "Remove widget"};
+        if (widgetsLocked) { toast("Widgets are locked (FEG Launcher settings > Widgets)"); return; }
+        final String[] arr = {"Resize by dragging", "Resize with buttons...", "Move earlier", "Move later", "Remove widget"};
         new AlertDialog.Builder(this).setItems(arr, new DialogInterface.OnClickListener() {
             @Override public void onClick(DialogInterface d, int which) {
                 int idx = items.indexOf(w);
                 if (idx < 0) return;
                 switch (which) {
-                    case 0: resizeWidget(w); return;
-                    case 1:
+                    case 0: enterWidgetEdit(w); return;
+                    case 1: resizeWidget(w); return;
+                    case 2:
                         if (idx > 0) { items.remove(idx); items.add(idx - 1, w); }
                         break;
-                    case 2:
+                    case 3:
                         if (idx < items.size() - 1) { items.remove(idx); items.add(idx + 1, w); }
                         break;
-                    default: removeItem(w); return;
+                    default: editWidget = null; removeItem(w); return;
                 }
                 saveItems();
                 rebuildHome();
@@ -2742,33 +3176,39 @@ public class MainActivity extends Activity {
         int per = drawerCols * rowsPer;
         drawerPagesBox.removeAllViews();
         int pages = Math.max(1, (shown.size() + per - 1) / per);
-        for (int p = 0; p < pages; p++) {
-            LinearLayout page = new LinearLayout(this);
-            page.setOrientation(LinearLayout.VERTICAL);
-            drawerPagesBox.addView(page, new LinearLayout.LayoutParams(w, ViewGroup.LayoutParams.MATCH_PARENT));
-            for (int r = 0; r < rowsPer; r++) {
-                LinearLayout row = new LinearLayout(this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                page.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-                for (int c = 0; c < drawerCols; c++) {
-                    int idx = p * per + r * drawerCols + c;
-                    View cell;
-                    if (idx < shown.size()) {
-                        final App a = shown.get(idx);
-                        cell = makeNamedCell(a);
-                        cell.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { launch(a, v); } });
-                        cell.setOnLongClickListener(new View.OnLongClickListener() {
-                            @Override public boolean onLongClick(View v) { appMenu(a, true, false); return true; }
-                        });
-                    } else {
-                        cell = new View(this);
-                    }
-                    row.addView(cell, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+        boolean loop = loopPages && pages > 1;
+        if (loop) drawerPagesBox.addView(buildDrawerPage(pages - 1, rowsPer, per), new LinearLayout.LayoutParams(w, ViewGroup.LayoutParams.MATCH_PARENT));
+        for (int p = 0; p < pages; p++)
+            drawerPagesBox.addView(buildDrawerPage(p, rowsPer, per), new LinearLayout.LayoutParams(w, ViewGroup.LayoutParams.MATCH_PARENT));
+        if (loop) drawerPagesBox.addView(buildDrawerPage(0, rowsPer, per), new LinearLayout.LayoutParams(w, ViewGroup.LayoutParams.MATCH_PARENT));
+        drawerPager.setPages(pages, w, loop);
+        drawerPager.goToNow(0);
+    }
+
+    private LinearLayout buildDrawerPage(int p, int rowsPer, int per) {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        for (int r = 0; r < rowsPer; r++) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            page.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+            for (int c = 0; c < drawerCols; c++) {
+                int idx = p * per + r * drawerCols + c;
+                View cell;
+                if (idx < shown.size()) {
+                    final App a = shown.get(idx);
+                    cell = makeNamedCell(a);
+                    cell.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { launch(a, v); } });
+                    cell.setOnLongClickListener(new View.OnLongClickListener() {
+                        @Override public boolean onLongClick(View v) { appMenu(a, true, false); return true; }
+                    });
+                } else {
+                    cell = new View(this);
                 }
+                row.addView(cell, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
             }
         }
-        drawerPager.setPages(pages, w);
-        drawerPager.goToNow(0);
+        return page;
     }
 
     // ---- search: settings and contacts under the app results
@@ -2785,7 +3225,7 @@ public class MainActivity extends Activity {
         {"Phone settings", Settings.ACTION_SETTINGS}
     };
     private static final String[] VOLTAGE_SETTINGS = {
-        "Voltage settings", "Wallpaper", "Icon style", "Icon size", "Icon labels", "Home screen layout", "App drawer", "App search"
+        "FEG Launcher settings", "Wallpaper", "Icon style", "Icon size", "Icon labels", "Home screen layout", "App drawer", "App search"
     };
 
     private void addExtraRow(String kind, String name, final Runnable action) {
@@ -2824,7 +3264,7 @@ public class MainActivity extends Activity {
             int n = 0;
             for (final String name : VOLTAGE_SETTINGS) {
                 if (n >= 2 || !name.toLowerCase().contains(s)) continue;
-                addExtraRow("Voltage", name, new Runnable() { public void run() { hideDrawerNow(); openSettings(); } });
+                addExtraRow("FEG Launcher", name, new Runnable() { public void run() { hideDrawerNow(); openSettings(); } });
                 n++;
             }
             for (final String[] e : PHONE_SETTINGS) {
@@ -2881,6 +3321,12 @@ public class MainActivity extends Activity {
 
     @Override public void onRequestPermissionsResult(int req, String[] perms, int[] results) {
         super.onRequestPermissionsResult(req, perms, results);
+        if (req == FegPlayerScreen.REQ_AUDIO) {
+            FegEngine fe = FegEngine.get(this);
+            if (fe.hasPermission()) fe.loadLibrary(true);
+            else Toast.makeText(this, "FEG-PLAY can't show your music without permission", Toast.LENGTH_LONG).show();
+            return;
+        }
         if (req != REQ_CONTACTS) return;
         if (results.length == 0 || results[0] != PackageManager.PERMISSION_GRANTED) {
             searchContacts = false;
@@ -2894,6 +3340,7 @@ public class MainActivity extends Activity {
 
     private void openDrawer(final boolean typing) {
         if (drawerOpen) return;
+        if (editWidget != null) exitWidgetEdit();
         drawerOpen = true;
         filter("");
         drawer.setAlpha(0f);
@@ -2939,18 +3386,44 @@ public class MainActivity extends Activity {
 
     // ================================================================ pager
 
-    /** Horizontal pages that snap to the nearest screen. */
+    /** Horizontal pages that snap to the nearest screen. With endless pages on, the content holds a copy of
+     *  the last page in front and a copy of the first page behind; reaching a copy jumps to the real page. */
     static class PagerHSV extends HorizontalScrollView {
         private int pages = 1, w = 1;
+        private boolean loop;
         private VelocityTracker vt;
 
         PagerHSV(Context c) { super(c); }
 
-        void setPages(int n, int width) { pages = n; w = Math.max(1, width); }
+        void setPages(int n, int width) { setPages(n, width, false); }
+        void setPages(int n, int width, boolean loopOn) {
+            pages = Math.max(1, n);
+            w = Math.max(1, width);
+            loop = loopOn && pages > 1;
+        }
+        boolean looping() { return loop; }
         int count() { return pages; }
-        int page() { return Math.max(0, Math.min(pages - 1, Math.round(getScrollX() / (float) w))); }
-        void goTo(int p) { smoothScrollTo(p * w, 0); }
-        void goToNow(int p) { scrollTo(p * w, 0); }
+        private int off() { return loop ? 1 : 0; }
+        private int maxPhys() { return pages - 1 + 2 * off(); }
+        /** Index of the child view on screen (copies included). */
+        int physical() { return Math.max(0, Math.min(maxPhys(), Math.round(getScrollX() / (float) w))); }
+        /** The page number the person sees (0 to count-1). */
+        int page() {
+            int p = physical() - off();
+            if (loop) return ((p % pages) + pages) % pages;
+            return Math.max(0, Math.min(pages - 1, p));
+        }
+        void goTo(int p) { smoothScrollTo((Math.max(0, Math.min(pages - 1, p)) + off()) * w, 0); }
+        void goToNow(int p) { scrollTo((Math.max(0, Math.min(pages - 1, p)) + off()) * w, 0); }
+        /** One screen left (-1) or right (+1); wraps around when endless. */
+        void step(int dir) { smoothScrollTo(Math.max(0, Math.min(maxPhys(), physical() + dir)) * w, 0); }
+
+        @Override protected void onScrollChanged(int l, int t, int ol, int ot) {
+            super.onScrollChanged(l, t, ol, ot);
+            if (!loop) return;
+            if (l <= 0) scrollTo(pages * w, 0);                 // reached the copy of the last page
+            else if (l >= (pages + 1) * w) scrollTo(w, 0);      // reached the copy of the first page
+        }
 
         @Override public void fling(int velocityX) { /* snapping is handled on touch up */ }
 
@@ -2968,11 +3441,57 @@ public class MainActivity extends Activity {
                 if (vx < -700) target = (int) Math.ceil(pos);
                 else if (vx > 700) target = (int) Math.floor(pos);
                 else target = Math.round(pos);
-                target = Math.max(0, Math.min(pages - 1, target));
+                target = Math.max(0, Math.min(maxPhys(), target));
                 smoothScrollTo(target * w, 0);
                 return handled;
             }
             return super.onTouchEvent(ev);
+        }
+    }
+
+    /** Wraps a widget so a long press is caught even when the widget's own content is clickable. */
+    static class WidgetShell extends FrameLayout {
+        private Runnable onLong;
+        private boolean fired;
+        private float downX, downY;
+        private final Runnable fire = new Runnable() {
+            public void run() { fired = true; if (onLong != null) onLong.run(); }
+        };
+
+        WidgetShell(Context c) { super(c); }
+
+        void setOnLP(Runnable r) { onLong = r; }
+
+        private void moved(MotionEvent e) {
+            if (Math.hypot(e.getRawX() - downX, e.getRawY() - downY) > ViewConfiguration.get(getContext()).getScaledTouchSlop())
+                removeCallbacks(fire);
+        }
+
+        @Override public boolean onInterceptTouchEvent(MotionEvent e) {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    fired = false;
+                    downX = e.getRawX(); downY = e.getRawY();
+                    postDelayed(fire, ViewConfiguration.getLongPressTimeout());
+                    break;
+                case MotionEvent.ACTION_MOVE: moved(e); break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL: removeCallbacks(fire); break;
+                default: break;
+            }
+            return fired;
+        }
+
+        @Override public boolean onTouchEvent(MotionEvent e) {
+            int a = e.getActionMasked();
+            if (a == MotionEvent.ACTION_MOVE) moved(e);
+            else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) removeCallbacks(fire);
+            return true; // claim the touch so the long press still ends properly on widgets that ignore touches
+        }
+
+        @Override protected void onDetachedFromWindow() {
+            removeCallbacks(fire);
+            super.onDetachedFromWindow();
         }
     }
 }

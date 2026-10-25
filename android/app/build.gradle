@@ -2,6 +2,6 @@ plugins { id 'com.android.application' }
 android {
     namespace 'com.camon18i.voltage'
     compileSdk 34
-    defaultConfig { applicationId 'com.camon18i.voltage'; minSdk 24; targetSdk 34; versionCode 8; versionName '3.5' }
+    defaultConfig { applicationId 'com.camon18i.voltage'; minSdk 24; targetSdk 34; versionCode 11; versionName '3.8' }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
 }

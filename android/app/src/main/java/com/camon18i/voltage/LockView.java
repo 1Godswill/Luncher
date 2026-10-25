@@ -31,15 +31,23 @@ public class LockView extends View {
 
     static class Ball {
         float x, y, vx, vy, r, phase, pop = -1f;
-        int val, rank;
-        boolean done;
+        int val, rank, order = -1;
+        boolean done, target = true;
         Bitmap bmp;
     }
 
     private final List<Ball> balls = new ArrayList<>();
     private final Random rnd = new Random();
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-    private final int count, speed;
+    static final int R_ASC = 0, R_DESC = 1, R_ODD = 2, R_EVEN = 3, R_ODD_ASC = 4, R_EVEN_ASC = 5, R_RANDOM = 6;
+    private static final String[] RULE_HINTS = {
+        "smallest first, biggest last", "biggest first, smallest last", "odd numbers only, any order",
+        "even numbers only, any order", "odd numbers, smallest first", "even numbers, smallest first"};
+
+    private final int count, speed, ruleUsed;
+    private final boolean showHint;
+    private final Runnable onPhonePin;
+    private int need;
     private final String title;
     private final boolean lowFps;
     private final Runnable onSuccess, onCancel;
@@ -51,11 +59,16 @@ public class LockView extends View {
     private Shader bgShader;
     private final SimpleDateFormat clockFmt = new SimpleDateFormat("HH:mm", Locale.getDefault());
 
-    public LockView(Context c, int count, int speed, String title, boolean lowFps, Runnable onSuccess, Runnable onCancel) {
+    public LockView(Context c, int count, int speed, int rule, boolean showHint, String title, boolean lowFps,
+                    Runnable onSuccess, Runnable onCancel, Runnable onPhonePin) {
         super(c);
-        this.count = Math.max(3, Math.min(9, count));
+        this.count = Math.max(4, Math.min(9, count));
         this.speed = Math.max(1, Math.min(5, speed));
-        this.title = title;
+        rule = Math.max(0, Math.min(R_RANDOM, rule));
+        this.ruleUsed = rule == R_RANDOM ? rnd.nextInt(R_RANDOM) : rule;
+        this.showHint = showHint || rule == R_RANDOM;   // a random rule can't be remembered, so it always shows the hint
+        this.onPhonePin = onPhonePin;
+        this.title = title == null ? "" : title;
         this.lowFps = lowFps;
         this.onSuccess = onSuccess;
         this.onCancel = onCancel;
@@ -125,19 +138,36 @@ public class LockView extends View {
     private void setup() {
         balls.clear();
         progress = 0;
+        boolean parityRule = ruleUsed >= R_ODD;
+        int wantOdd = (ruleUsed == R_ODD || ruleUsed == R_ODD_ASC) ? 1 : 0;
         TreeSet<Integer> vals = new TreeSet<>();
-        while (vals.size() < count) vals.add(1 + rnd.nextInt(99));
+        if (!parityRule) {
+            while (vals.size() < count) vals.add(1 + rnd.nextInt(99));
+        } else {
+            // some numbers with the wanted parity (the ones to tap) and at least one decoy of the other parity
+            int t = Math.min(count - 1, Math.max(2, count / 2 + rnd.nextInt(2)));
+            int got = 0;
+            while (got < t) { int v = 1 + rnd.nextInt(99); if (v % 2 == wantOdd && vals.add(v)) got++; }
+            while (vals.size() < count) { int v = 1 + rnd.nextInt(99); if (v % 2 != wantOdd) vals.add(v); }
+        }
         float minR = dp(24), maxR = dp(50);
-        int i = 0;
+        int i = 0, targetIdx = 0;
         int w = getWidth(), h = getHeight();
         float top = dp(170);
         for (int v : vals) {
             Ball b = new Ball();
             b.val = v;
             b.rank = i;
+            if (ruleUsed == R_ASC) { b.target = true; b.order = i; }
+            else if (ruleUsed == R_DESC) { b.target = true; b.order = count - 1 - i; }
+            else {
+                b.target = (v % 2 == wantOdd);
+                if (b.target && (ruleUsed == R_ODD_ASC || ruleUsed == R_EVEN_ASC)) b.order = targetIdx;
+                if (b.target) targetIdx++;
+            }
             b.r = minR + (maxR - minR) * i / (count - 1);
             b.x = b.r + rnd.nextFloat() * Math.max(1f, w - 2 * b.r);
-            b.y = top + b.r + rnd.nextFloat() * Math.max(1f, h - top - dp(60) - 2 * b.r);
+            b.y = top + b.r + rnd.nextFloat() * Math.max(1f, h - top - dp(70) - 2 * b.r);
             double ang = rnd.nextDouble() * Math.PI * 2;
             float sp = dp(12 + 9 * speed) * (0.7f + rnd.nextFloat() * 0.6f);
             b.vx = (float) Math.cos(ang) * sp;
@@ -147,6 +177,7 @@ public class LockView extends View {
             balls.add(b);
             i++;
         }
+        need = parityRule ? targetIdx : count;
     }
 
     private void step(float dt) {
@@ -165,7 +196,7 @@ public class LockView extends View {
             if (b.x < b.r) { b.x = b.r; b.vx = Math.abs(b.vx); }
             if (b.x > w - b.r) { b.x = w - b.r; b.vx = -Math.abs(b.vx); }
             if (b.y < top + b.r) { b.y = top + b.r; b.vy = Math.abs(b.vy); }
-            if (b.y > h - dp(40) - b.r) { b.y = h - dp(40) - b.r; b.vy = -Math.abs(b.vy); }
+            if (b.y > h - dp(64) - b.r) { b.y = h - dp(64) - b.r; b.vy = -Math.abs(b.vy); }
         }
         if (shake > 0f) shake = Math.max(0f, shake - dt * 2.5f);
     }
@@ -184,10 +215,18 @@ public class LockView extends View {
         p.setTypeface(Typeface.DEFAULT);
         p.setTextSize(dp(14));
         p.setColor(0xCCFFFFFF);
-        c.drawText(title, w / 2f, dp(124), p);
-        p.setTextSize(dp(12));
-        p.setColor(0x88FFFFFF);
-        c.drawText(progress + " / " + count + "   (smallest first, biggest last)", w / 2f, dp(144), p);
+        if (title.length() > 0) c.drawText(title, w / 2f, dp(124), p);
+        if (showHint) {
+            p.setTextSize(dp(12));
+            p.setColor(0x88FFFFFF);
+            c.drawText(progress + " / " + need + "   (" + RULE_HINTS[ruleUsed] + ")", w / 2f, dp(144), p);
+        }
+        if (onPhonePin != null) {   // small white dot: tap to use the phone's own PIN / pattern instead
+            p.setColor(0x33FFFFFF);
+            c.drawCircle(w / 2f, h - dp(28), dp(9), p);
+            p.setColor(0xDDFFFFFF);
+            c.drawCircle(w / 2f, h - dp(28), dp(4.5f), p);
+        }
         if (onCancel != null) {
             p.setTextSize(dp(24));
             p.setColor(0xCCFFFFFF);
@@ -226,6 +265,10 @@ public class LockView extends View {
         if (e.getActionMasked() != MotionEvent.ACTION_DOWN || finished) return true;
         float x = e.getX(), y = e.getY();
         if (onCancel != null && x > getWidth() - dp(70) && y < dp(76)) { finished = true; onCancel.run(); return true; }
+        if (onPhonePin != null && Math.hypot(x - getWidth() / 2f, y - (getHeight() - dp(28))) < dp(30)) {
+            onPhonePin.run();
+            return true;
+        }
         Ball hit = null;
         float best = 9999f;
         for (Ball b : balls) {
@@ -234,12 +277,13 @@ public class LockView extends View {
             if (d < 1.15f && d < best) { best = d; hit = b; }
         }
         if (hit == null) return true;
-        if (hit.rank == progress) {
+        boolean right = hit.target && (hit.order < 0 || hit.order == progress);
+        if (right) {
             hit.done = true;
             hit.pop = 0f;
             progress++;
             performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
-            if (progress >= count) {
+            if (progress >= need) {
                 finished = true;
                 postDelayed(new Runnable() { public void run() { if (onSuccess != null) onSuccess.run(); } }, 350);
             }
