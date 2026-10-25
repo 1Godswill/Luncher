@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <version>1</version>
+    <category title="All"/>
+    <item drawable="ic_phone"/>
+    <item drawable="ic_messages"/>
+    <item drawable="ic_contacts"/>
+    <item drawable="ic_camera"/>
+    <item drawable="ic_gallery"/>
+    <item drawable="ic_settings"/>
+    <item drawable="ic_chrome"/>
+    <item drawable="ic_playstore"/>
+    <item drawable="ic_clock"/>
+    <item drawable="ic_calculator"/>
+    <item drawable="ic_files"/>
+    <item drawable="ic_music"/>
+    <item drawable="ic_calendar"/>
+    <item drawable="ic_maps"/>
+    <item drawable="ic_gmail"/>
+</resources>

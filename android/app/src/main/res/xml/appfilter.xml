@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <iconback img1="ic_back"/>
+    <scale factor="1.0"/>
+    <item component="ComponentInfo{com.android.dialer/com.android.dialer.main.impl.MainActivity}" drawable="ic_phone"/>
+    <item component="ComponentInfo{com.android.dialer/com.android.dialer.DialtactsActivity}" drawable="ic_phone"/>
+    <item component="ComponentInfo{com.google.android.dialer/com.google.android.dialer.extensions.GoogleDialtactsActivity}" drawable="ic_phone"/>
+    <item component="ComponentInfo{com.google.android.apps.messaging/com.google.android.apps.messaging.ui.ConversationListActivity}" drawable="ic_messages"/>
+    <item component="ComponentInfo{com.android.mms/com.android.mms.ui.ConversationList}" drawable="ic_messages"/>
+    <item component="ComponentInfo{com.android.contacts/com.android.contacts.activities.PeopleActivity}" drawable="ic_contacts"/>
+    <item component="ComponentInfo{com.google.android.contacts/com.android.contacts.activities.PeopleActivity}" drawable="ic_contacts"/>
+    <item component="ComponentInfo{com.mediatek.camera/com.mediatek.camera.CameraLauncher}" drawable="ic_camera"/>
+    <item component="ComponentInfo{com.android.camera/com.android.camera.Camera}" drawable="ic_camera"/>
+    <item component="ComponentInfo{com.transsion.camera/com.transsion.camera.CameraLauncher}" drawable="ic_camera"/>
+    <item component="ComponentInfo{com.gallery20/com.android.gallery3d.app.GalleryActivity}" drawable="ic_gallery"/>
+    <item component="ComponentInfo{com.google.android.apps.photos/com.google.android.apps.photos.home.HomeActivity}" drawable="ic_gallery"/>
+    <item component="ComponentInfo{com.android.settings/com.android.settings.Settings}" drawable="ic_settings"/>
+    <item component="ComponentInfo{com.android.chrome/com.google.android.apps.chrome.Main}" drawable="ic_chrome"/>
+    <item component="ComponentInfo{com.android.vending/com.google.android.finsky.activities.MainActivity}" drawable="ic_playstore"/>
+    <item component="ComponentInfo{com.google.android.deskclock/com.android.deskclock.DeskClock}" drawable="ic_clock_dyn"/>
+    <item component="ComponentInfo{com.transsion.deskclock/com.android.deskclock.DeskClock}" drawable="ic_clock_dyn"/>
+    <item component="ComponentInfo{com.google.android.calculator/com.android.calculator2.Calculator}" drawable="ic_calculator"/>
+    <item component="ComponentInfo{com.transsion.calculator/com.android.calculator2.Calculator}" drawable="ic_calculator"/>
+    <item component="ComponentInfo{com.google.android.apps.nbu.files/com.google.android.apps.nbu.files.home.HomeActivity}" drawable="ic_files"/>
+    <item component="ComponentInfo{com.google.android.apps.youtube.music/com.google.android.apps.youtube.music.activities.MusicActivity}" drawable="ic_music"/>
+    <calendar component="ComponentInfo{com.google.android.calendar/com.android.calendar.AllInOneActivity}" prefix="calendar_"/>
+    <item component="ComponentInfo{com.google.android.apps.maps/com.google.android.maps.MapsActivity}" drawable="ic_maps"/>
+    <item component="ComponentInfo{com.google.android.gm/com.google.android.gm.ConversationListActivityGmail}" drawable="ic_gmail"/>
+    <dynamic-clock image="ic_clock_dyn" hourLayerIndex="1" minuteLayerIndex="2" secondLayerIndex="3" defaultHour="10" defaultMinute="10" defaultSecond="30"/>
+</resources>
