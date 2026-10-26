@@ -25,7 +25,7 @@ import java.util.TreeSet;
 
 /**
  * Number-puzzle lock: glossy 3D numbers drift around at random. Tap them from the smallest to the biggest;
- * the biggest one opens the lock. A wrong tap resets the sequence. Bigger number = bigger ball.
+ * the biggest one opens the lock. A wrong tap resets the sequence. All balls are the same size; the number on the ball is what counts.
  */
 public class LockView extends View {
 
@@ -150,7 +150,6 @@ public class LockView extends View {
             while (got < t) { int v = 1 + rnd.nextInt(99); if (v % 2 == wantOdd && vals.add(v)) got++; }
             while (vals.size() < count) { int v = 1 + rnd.nextInt(99); if (v % 2 != wantOdd) vals.add(v); }
         }
-        float minR = dp(24), maxR = dp(50);
         int i = 0, targetIdx = 0;
         int w = getWidth(), h = getHeight();
         float top = dp(170);
@@ -165,7 +164,7 @@ public class LockView extends View {
                 if (b.target && (ruleUsed == R_ODD_ASC || ruleUsed == R_EVEN_ASC)) b.order = targetIdx;
                 if (b.target) targetIdx++;
             }
-            b.r = minR + (maxR - minR) * i / (count - 1);
+            b.r = dp(38);   // every ball is the same size
             b.x = b.r + rnd.nextFloat() * Math.max(1f, w - 2 * b.r);
             b.y = top + b.r + rnd.nextFloat() * Math.max(1f, h - top - dp(70) - 2 * b.r);
             double ang = rnd.nextDouble() * Math.PI * 2;
