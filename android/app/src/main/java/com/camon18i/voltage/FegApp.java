@@ -18,7 +18,6 @@ import java.io.StringWriter;
 public class FegApp extends Application {
     @Override public void onCreate() {
         super.onCreate();
-        try { Freezer.get(this).register(); } catch (Throwable ignored) {}   // freezes awake apps again when the screen turns off
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
             @Override public void uncaughtException(Thread t, Throwable e) {
                 try {

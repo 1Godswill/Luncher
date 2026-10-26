@@ -26,29 +26,10 @@ The APK is a standalone home screen, no Nova needed. After installing, press Hom
 - A faint "feg-tech" watermark sits at the bottom left of the home screen.
 - To go back to your old launcher: Settings > Apps > Default apps > Home app.
 
-## What's new in v4.0: App freezer
-Freeze apps you rarely use so they cannot run, send notifications or use battery, and bring them back in one tap.
-- **Open it**: long-press empty space > **App freezer**, or Voltage settings > **App freezer** > Open app freezer. You can also give a gesture the action **App freezer** (Settings > Gestures).
-- **Freeze one app**: long-press any app (home, drawer, dock, folder) > **Freeze app**. Long-press a frozen app > **Unfreeze app**.
-- **Launch from the freezer without unfreezing it**: tap a frozen app in the freezer list, on the home screen, in a folder, in the dock or in search. It wakes up for the launch, opens, and is frozen again by itself when the screen turns off (or, if you choose that rule, 30 seconds after you are back on the home screen). It never leaves the Frozen list. (A switched-off app cannot start, so Android has to switch it on for a moment: this is the only way to open it.) The freezer shows apps that are awake right now, with a button to freeze them again immediately.
-- **Bulk freeze**: freezer > tab **Freeze apps** > tick as many apps as you like (or **Select all**, or search first) > **Freeze selected**. System apps are hidden unless you switch on **System apps**.
-- **Bulk unfreeze**: freezer > tab **Frozen** > tick apps > **Unfreeze selected**.
-- **Unfreeze all**: freezer > tab **Frozen** > **Unfreeze all** (asks once to confirm).
-- Frozen apps keep their place on the home screen, in folders and in the dock, with a faded icon and a small blue snowflake. They are left out of the app drawer list, but search still finds them.
-- **Protected**: FEG Launcher itself, your home screen apps, your keyboard, Settings, System UI, the phone and dialer, Google Play services and Shizuku can never be frozen.
-
-### How apps are really frozen (one-time setup)
-Android only lets the shell or root switch apps off. Pick what suits you in Voltage settings > App freezer > **Freeze with**:
-1. **Shizuku** (best, no PC needed on Android 11+): install Shizuku, open it, choose *Start via Wireless debugging* and follow its steps, then in FEG Launcher open App freezer > **Set up** > *Allow FEG Launcher in Shizuku*. Shizuku has to be started again after every reboot.
-2. **Root**: if the phone is rooted (Magisk etc.) the launcher uses it automatically.
-3. **Soft only**: with neither, freezing is *soft*: the app is hidden from the drawer and its background processes are stopped, but it is not switched off and can still wake itself up.
-**Auto** (the default) uses Shizuku if it is allowed, then root, then soft.
-
-### Good to know
-- The list of frozen apps is kept in its own file, so *Reset* and *Restore backup* never make the launcher forget which apps are switched off.
-- **Unfreeze everything before uninstalling FEG Launcher.** If you forget: Android Settings > Apps > (show disabled apps) > the app > Enable.
-- An app that you switch on from Android Settings is dropped from the list by itself.
-- Source: `Freezer.java` (engine: Shizuku / root / soft, list, wake-and-refreeze), `FreezerScreen.java` (the screen), the freezer card in `SettingsPanel.java`, and small hooks in `MainActivity.java` (frozen apps stay in the layout, snowflake icon, wake on launch). Build changes: Shizuku libraries in `app/build.gradle`, `android.useAndroidX=true`, a Shizuku provider and two permissions in the manifest.
+## What's new in v4.1
+- **App freezer removed completely.** No freezer screen, no Freeze/Unfreeze menu items, no gesture or home-menu entry, and no Shizuku (libraries, provider and permissions are gone from the build).
+- **Animated icons setting.** Voltage settings > 3D effects > **Animated icons**: icons gently float on the home screen and dock. It is on by default and can be switched off. Battery saver and Reduce animations still pause it.
+- If you froze apps with v4.0: switch them back on in Android Settings > Apps > (show disabled apps) > the app > Enable, or in Shizuku/ADB with `pm enable <package>`.
 
 ## What's new in v3.8
 - **Badge counters now draw in front of the icon** (they were hidden behind icons that have the 3D shadow effect on).
@@ -84,7 +65,7 @@ Long-press empty space > **Voltage settings**.
 - **Animation effects**: app opening (Zoom, Fade, Slide up, None), coming back home (Zoom, Fade, Slide down, None), page scrolling (Slide, Cube, Zoom, Fade), folder opening (Pop, Fade, Slide up, None), and an animation speed of 50 to 200%.
 - **Folder style**: Glass, Transparent, 3D or Rounded, for both the home tile and the folder window, plus folder size 70 to 130%.
 - **Theme**: Dark, Light, Auto (follows the phone) or Custom (pick an accent colour and a background). Colours the settings screen, app drawer and folder windows; home names stay white over the wallpaper.
-- **3D effects**: icon shadows, a depth slider (shadow height, parallax travel, cube tilt), tilt parallax (icons shift against the wallpaper as you tilt the phone), wallpaper that moves with the pages, and floating icons.
+- **3D effects**: icon shadows, a depth slider (shadow height, parallax travel, cube tilt), tilt parallax (icons shift against the wallpaper as you tilt the phone), wallpaper that moves with the pages, and animated (floating) icons.
 - **Screen lock**: glossy 3D numbers float around at random. Pick the unlock rule: smallest to biggest, biggest to smallest, odd numbers only, even numbers only, odd or even smallest first, or random each time. The lock screen shows no instructions unless you switch on "Show the rule" (random always shows it). Wrong tap starts over. Choose 4 to 9 numbers and the speed, lock when the screen turns off, preview, or lock now. A small white dot at the bottom switches to the phone's own PIN, pattern or password. It protects Voltage only; keep the phone's own lock on. App lock uses the same rule.
 - **Hide apps**: pick apps to hide from the drawer (and optionally from search). Long-press an app in the drawer and choose Hide app. Unhide from the same list.
 - **App lock**: choose apps that ask for the number puzzle before opening from Voltage. Ask every time, after 1 min or after 5 min.

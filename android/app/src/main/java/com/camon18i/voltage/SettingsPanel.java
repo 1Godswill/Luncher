@@ -42,7 +42,6 @@ public class SettingsPanel extends FrameLayout {
         void close();
         void addWidget();
         void chooseDock();
-        void openFreezer();
         String gestureLabel(String key, int def);
         void chooseGesture(String key, int def, Runnable done);
         boolean badgeAccess();
@@ -557,8 +556,8 @@ public class SettingsPanel extends FrameLayout {
         seekRow(fx, "Depth (shadow height, parallax, page tilt)", "fx_depth", 0, 100, 50);
         toggleRow(fx, "Tilt parallax (icons shift as you tilt the phone)", "fx_parallax", false);
         toggleRow(fx, "Wallpaper moves with pages", "fx_wpscroll", false);
-        toggleRow(fx, "Floating icons", "fx_float", false);
-        note(fx, "Tilt parallax and floating icons use a little battery. Battery saver turns them off.");
+        toggleRow(fx, "Animated icons (icons gently float on the home screen and dock)", "fx_float", true);
+        note(fx, "Tilt parallax and animated icons use a little battery. Battery saver and Reduce animations turn them off.");
 
         // ---- 16. screen lock
         LinearLayout lk = card(col, "SCREEN LOCK");
@@ -578,12 +577,6 @@ public class SettingsPanel extends FrameLayout {
         toggleRow(hd, "Also hide from search", "hide_search", true);
         note(hd, "Hidden apps disappear from the app drawer (and from home when the drawer is off). Open this list again and untick to bring them back. They still run normally.");
 
-        // ---- 17b. app freezer
-        LinearLayout fr = card(col, "APP FREEZER");
-        pillIn(fr, "Open app freezer", new Runnable() { public void run() { host.openFreezer(); } });
-        segRow(fr, "Freeze with", new String[]{"Auto", "Shizuku", "Root", "Soft only"}, "freeze_mode", 0);
-        segRow(fr, "Freeze awake apps again", new String[]{"When the screen turns off", "Screen off, or 30 s after going home"}, "freeze_refreeze", 0);
-        note(fr, "A frozen app is switched off: it cannot run, send notifications or use battery. Real freezing needs Shizuku (no PC: start it with Wireless debugging) or root. Without them freezing is soft: the app is hidden from the drawer and stopped, but not switched off. Tap a frozen app (home, search or the freezer) to open it: it wakes up, starts, and freezes again by itself. Long-press any app > Freeze app, or use the freezer to freeze and unfreeze many at once. Unfreeze everything before uninstalling FEG Launcher.");
 
         // ---- 18. app lock
         LinearLayout al = card(col, "APP LOCK");
