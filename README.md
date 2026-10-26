@@ -29,6 +29,7 @@ The APK is a standalone home screen, no Nova needed. After installing, press Hom
 ## What's new in v4.1
 - **App freezer removed completely.** No freezer screen, no Freeze/Unfreeze menu items, no gesture or home-menu entry, and no Shizuku (libraries, provider and permissions are gone from the build).
 - **Animated icons setting.** Voltage settings > 3D effects > **Animated icons**: icons gently float on the home screen and dock. It is on by default and can be switched off. Battery saver and Reduce animations still pause it.
+- **Animated app icons.** Voltage settings > 3D effects > **Animated app icons** plays the animated WebP of each themed icon (phone, messages, Chrome, Maps and the rest) on the home screen, dock and drawer. Needs Android 9+ and the 3D icon style. The live clock and calendar keep their own live icons. On by default; Battery saver and Reduce animations pause it.
 - If you froze apps with v4.0: switch them back on in Android Settings > Apps > (show disabled apps) > the app > Enable, or in Shizuku/ADB with `pm enable <package>`.
 
 ## What's new in v3.8

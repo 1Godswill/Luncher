@@ -552,12 +552,13 @@ public class SettingsPanel extends FrameLayout {
 
         // ---- 15. 3D effects
         LinearLayout fx = card(col, "3D EFFECTS");
+        toggleRow(fx, "Animated app icons (plays each icon's animation: Chrome, Maps, Camera and more)", "anim_icons", true);
         toggleRow(fx, "Icon shadows", "fx_shadows", false);
         seekRow(fx, "Depth (shadow height, parallax, page tilt)", "fx_depth", 0, 100, 50);
         toggleRow(fx, "Tilt parallax (icons shift as you tilt the phone)", "fx_parallax", false);
         toggleRow(fx, "Wallpaper moves with pages", "fx_wpscroll", false);
         toggleRow(fx, "Animated icons (icons gently float on the home screen and dock)", "fx_float", true);
-        note(fx, "Tilt parallax and animated icons use a little battery. Battery saver and Reduce animations turn them off.");
+        note(fx, "Tilt parallax, floating and animated icons use a little battery. Animated app icons need Android 9+ and the 3D icon style. Battery saver and Reduce animations turn them off.");
 
         // ---- 16. screen lock
         LinearLayout lk = card(col, "SCREEN LOCK");

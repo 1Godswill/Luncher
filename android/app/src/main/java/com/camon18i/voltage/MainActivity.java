@@ -154,6 +154,8 @@ public class MainActivity extends Activity {
     private Runnable lockOk;
     private boolean fxShadows, fxParallax, fxWpScroll, fxFloat, lockOn, lockScreenOff = true, appLock, hideSearch = true;
     private boolean reduceAnim, autoSaver = true, trimMem = true;
+    private boolean animIcons = true;   // v4.1: play the animated version of each themed icon
+    private final java.util.Set<Object> animDrawables = java.util.Collections.newSetFromMap(new java.util.WeakHashMap<Object, Boolean>());
     private boolean saverNow = false, resumed = false, awayFlag = false, lockPending = false, lockCancellable = false;
     private final Set<String> hiddenPkgs = new HashSet<>(), protectedPkgs = new HashSet<>();
     private final Map<String, Long> appUnlocked = new HashMap<>();
@@ -1241,6 +1243,41 @@ public class MainActivity extends Activity {
 
     private int scaled(float dpValue) { return dp(dpValue * iconSizePct / 100f); }
 
+    /** v4.1: the animated WebP version of a themed icon (Android 9+). The live clock and calendar keep their own live icons. */
+    private android.graphics.drawable.Drawable animIconDrawable(App a, int size) {
+        if (!animIcons || reduceAnim || saverNow || iconStyle != IconStyler.CLAY) return null;
+        if (android.os.Build.VERSION.SDK_INT < 28) return null;
+        if (a.isCal() || a.isClock() || a.iconName == null) return null;
+        String n = a.iconName.startsWith("ic_") ? a.iconName.substring(3) : a.iconName;
+        try {
+            final int sz = Math.max(size, 1);
+            android.graphics.ImageDecoder.Source src = android.graphics.ImageDecoder.createSource(getAssets(), "animated/" + n + ".webp");
+            android.graphics.drawable.Drawable d = android.graphics.ImageDecoder.decodeDrawable(src, new android.graphics.ImageDecoder.OnHeaderDecodedListener() {
+                @Override public void onHeaderDecoded(android.graphics.ImageDecoder dec, android.graphics.ImageDecoder.ImageInfo info, android.graphics.ImageDecoder.Source s) {
+                    dec.setTargetSize(sz, sz);
+                }
+            });
+            if (d instanceof android.graphics.drawable.AnimatedImageDrawable) {
+                android.graphics.drawable.AnimatedImageDrawable ad = (android.graphics.drawable.AnimatedImageDrawable) d;
+                ad.setRepeatCount(android.graphics.drawable.AnimatedImageDrawable.REPEAT_INFINITE);
+                animDrawables.add(ad);
+                if (resumed) ad.start();
+                return ad;
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private void setAnimIconsRunning(boolean run) {
+        if (android.os.Build.VERSION.SDK_INT < 28) return;
+        for (Object o : animDrawables.toArray()) {
+            try {
+                android.graphics.drawable.AnimatedImageDrawable ad = (android.graphics.drawable.AnimatedImageDrawable) o;
+                if (run) ad.start(); else ad.stop();
+            } catch (Throwable ignored) {}
+        }
+    }
+
     private View makeIcon(App a, int size) {
         View v;
         if (a.isClock()) {
@@ -1265,6 +1302,8 @@ public class MainActivity extends Activity {
             ImageView iv = new ImageView(this);
             iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
             iv.setImageBitmap(a.isCal() ? calendarBitmap() : a.plain);
+            android.graphics.drawable.Drawable animD = animIconDrawable(a, size);
+            if (animD != null) iv.setImageDrawable(animD);
             if (fxShadows) {
                 final int rr = (int) (size * 0.22f);
                 iv.setOutlineProvider(new ViewOutlineProvider() {
@@ -2139,7 +2178,8 @@ public class MainActivity extends Activity {
             case "fx_shadows": fxShadows = prefs.getBoolean(k, false); refreshAllCells(); break;
             case "fx_depth": fxDepth = clampi(prefs.getInt(k, 50), 0, 100); refreshAllCells(); break;
             case "fx_parallax": fxParallax = prefs.getBoolean(k, false); if (resumed) startFx(); break;
-            case "fx_float": fxFloat = prefs.getBoolean(k, false); if (resumed) startFx(); break;
+            case "fx_float": fxFloat = prefs.getBoolean(k, true); if (resumed) startFx(); break;
+            case "anim_icons": animIcons = prefs.getBoolean(k, true); reloadAll(); break;
             case "fx_wpscroll":
                 fxWpScroll = prefs.getBoolean(k, false);
                 if (!fxWpScroll) { try { wpm.setWallpaperOffsets(root.getWindowToken(), 0.5f, 0.5f); } catch (Exception ignored) {} }
@@ -2194,6 +2234,7 @@ public class MainActivity extends Activity {
         fxParallax = prefs.getBoolean("fx_parallax", false);
         fxWpScroll = prefs.getBoolean("fx_wpscroll", false);
         fxFloat = prefs.getBoolean("fx_float", true);
+        animIcons = prefs.getBoolean("anim_icons", true);
         lockOn = prefs.getBoolean("lock_on", false);
         lockScreenOff = prefs.getBoolean("lock_screenoff", true);
         lockCount = clampi(prefs.getInt("lock_count", 6), 4, 9);
@@ -2374,6 +2415,7 @@ public class MainActivity extends Activity {
     private void startFx() {
         stopFx();
         if (reduceAnim || saverNow) return;
+        setAnimIconsRunning(true);
         if (fxFloat) {
             floatAnim = ValueAnimator.ofFloat(0f, 1f);
             floatAnim.setDuration(4200);
@@ -2393,6 +2435,7 @@ public class MainActivity extends Activity {
     }
 
     private void stopFx() {
+        setAnimIconsRunning(false);
         if (floatAnim != null) { floatAnim.cancel(); floatAnim = null; }
         if (sensors != null) sensors.unregisterListener(tiltListener);
         for (View v : floatViews) v.setTranslationY(0f);
