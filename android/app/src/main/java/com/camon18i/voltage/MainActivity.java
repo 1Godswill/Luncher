@@ -556,7 +556,6 @@ public class MainActivity extends Activity {
                         : IconStyler.tileFromDrawable(ri.loadIcon(pm), iconStyle);
             }
         }
-        makeIconsDistinct();
         buildDock();
         if (apps.isEmpty() && !old.isEmpty()) return; // query failed: keep the saved layout untouched
         loadItems();
@@ -583,93 +582,6 @@ public class MainActivity extends Activity {
             }
             for (App a : l) if (a != best) a.iconName = null;
         }
-    }
-
-    /** Small fingerprint of an icon (12x12 colours) used to spot icons that look the same. */
-    private float[] iconSig(Bitmap b) {
-        final int N = 12;
-        float[] v = new float[N * N * 4];
-        try {
-            Bitmap s = Bitmap.createScaledBitmap(b, N, N, true);
-            int[] px = new int[N * N];
-            s.getPixels(px, 0, N, 0, 0, N, N);
-            if (s != b) s.recycle();
-            for (int i = 0; i < px.length; i++) {
-                int c = px[i];
-                v[i * 4] = Color.alpha(c);
-                v[i * 4 + 1] = Color.red(c);
-                v[i * 4 + 2] = Color.green(c);
-                v[i * 4 + 3] = Color.blue(c);
-            }
-        } catch (Throwable ignored) {}
-        return v;
-    }
-
-    private static float sigDist(float[] a, float[] b) {
-        float t = 0f;
-        for (int i = 0; i < a.length; i++) t += Math.abs(a[i] - b[i]);
-        return t / a.length;
-    }
-
-    /** Apps whose icons still look the same (even if only similar) get a coloured letter tag, so every icon is different. */
-    private void makeIconsDistinct() {
-        final float SAME = 8f; // average difference (0..255) below which two icons count as the same
-        List<float[]> reps = new ArrayList<>();
-        List<List<App>> groups = new ArrayList<>();
-        for (App a : apps) {
-            if (a.plain == null || a.isClock() || a.isCal()) continue;
-            float[] sg = iconSig(a.plain);
-            int g = -1;
-            for (int i = 0; i < reps.size(); i++) if (sigDist(reps.get(i), sg) < SAME) { g = i; break; }
-            if (g < 0) {
-                reps.add(sg);
-                List<App> l = new ArrayList<>();
-                l.add(a);
-                groups.add(l);
-            } else groups.get(g).add(a);
-        }
-        for (List<App> l : groups) {
-            if (l.size() < 2) continue;
-            // the app with a themed clay icon (or the first one) keeps the plain icon
-            int keep = 0;
-            for (int i = 0; i < l.size(); i++) if (l.get(i).iconName != null) { keep = i; break; }
-            int k = 0;
-            for (int i = 0; i < l.size(); i++) {
-                if (i == keep) continue;
-                k++;
-                App a = l.get(i);
-                a.plain = tagged(a.plain, a, k, l.size());
-            }
-        }
-    }
-
-    /** Copy of the icon with a small coloured letter tag in the corner. Each tag in a group has its own colour. */
-    private Bitmap tagged(Bitmap src, App a, int k, int n) {
-        Bitmap out;
-        try { out = src.copy(Bitmap.Config.ARGB_8888, true); } catch (Throwable t) { return src; }
-        if (out == null) return src;
-        Canvas c = new Canvas(out);
-        float W = out.getWidth();
-        float r = W * 0.15f, cx = W * 0.75f, cy = W * 0.73f;
-        float hue = (25f + k * 360f / Math.max(2, n)) % 360f;
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setColor(0x66000000);
-        c.drawCircle(cx, cy + W * 0.012f, r + W * 0.012f, p);
-        p.setColor(Color.HSVToColor(new float[]{hue, 0.75f, 0.9f}));
-        c.drawCircle(cx, cy, r, p);
-        p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(W * 0.018f);
-        p.setColor(Color.WHITE);
-        c.drawCircle(cx, cy, r, p);
-        String t = a.label == null || a.label.trim().isEmpty() ? "?" : a.label.trim().substring(0, 1).toUpperCase();
-        Paint tp = new Paint(Paint.ANTI_ALIAS_FLAG);
-        tp.setColor(Color.WHITE);
-        tp.setTypeface(Typeface.DEFAULT_BOLD);
-        tp.setTextAlign(Paint.Align.CENTER);
-        tp.setTextSize(r * 1.15f);
-        Paint.FontMetrics fm = tp.getFontMetrics();
-        c.drawText(t, cx, cy - (fm.ascent + fm.descent) / 2f, tp);
-        return out;
     }
 
     private Bitmap res(String name) {
@@ -3006,6 +2918,7 @@ public class MainActivity extends Activity {
 
     // ================================================================ widgets
 
+    /** Add widget: every widget is shown with its preview picture and size before you add it. */
     private void pickWidget() {
         final List<AppWidgetProviderInfo> list = new ArrayList<>(wm.getInstalledProviders());
         final Map<AppWidgetProviderInfo, String> names = new HashMap<>();
@@ -3021,14 +2934,75 @@ public class MainActivity extends Activity {
                 return names.get(x).compareToIgnoreCase(names.get(y));
             }
         });
-        String[] arr = new String[list.size() + 1];
-        arr[0] = "FEG-PLAY - music player";
-        for (int i = 1; i < arr.length; i++) arr[i] = names.get(list.get(i - 1));
-        new AlertDialog.Builder(this).setTitle("Add widget").setItems(arr, new DialogInterface.OnClickListener() {
-            @Override public void onClick(DialogInterface d, int w) {
-                if (w == 0) addFegWidget(); else bindWidget(list.get(w - 1));
-            }
-        }).show();
+        final AlertDialog.Builder b = new AlertDialog.Builder(this);
+        final Context c = b.getContext();
+        ScrollView sv = new ScrollView(c);
+        LinearLayout col = new LinearLayout(c);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(12), dp(8), dp(12), dp(8));
+        sv.addView(col, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        final AlertDialog[] dlg = new AlertDialog[1];
+
+        // FEG-PLAY first (drawn preview, it is not an Android widget)
+        FrameLayout fp = new FrameLayout(c);
+        GradientDrawable fg = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xFF2A2F55, 0xFF14162B});
+        fg.setCornerRadius(dp(16));
+        fp.setBackground(fg);
+        TextView ft = new TextView(c);
+        ft.setText("\u266B  FEG-PLAY");
+        ft.setTextColor(Color.WHITE);
+        ft.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        ft.setTypeface(Typeface.DEFAULT_BOLD);
+        ft.setGravity(Gravity.CENTER);
+        fp.addView(ft, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        col.addView(widgetPickRow(c, "FEG-PLAY - music player", "4 x 2", fp, dp(110), new Runnable() {
+            public void run() { dlg[0].dismiss(); addFegWidget(); }
+        }));
+
+        float dens = getResources().getDisplayMetrics().density;
+        for (final AppWidgetProviderInfo info : list) {
+            Drawable d = null;
+            try { d = info.loadPreviewImage(this, 0); } catch (Throwable ignored) {}
+            if (d == null) { try { d = info.loadIcon(this, 0); } catch (Throwable ignored) {} }
+            ImageView iv = new ImageView(c);
+            iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            iv.setAdjustViewBounds(true);
+            if (d != null) iv.setImageDrawable(d);
+            GradientDrawable bgd = new GradientDrawable();
+            bgd.setColor(0x22808080);
+            bgd.setCornerRadius(dp(16));
+            iv.setBackground(bgd);
+            iv.setPadding(dp(8), dp(8), dp(8), dp(8));
+            int cols = Math.max(1, Math.min(COLS, (int) Math.ceil(info.minWidth / Math.max(1f, cellW()))));
+            int rows = Math.max(1, Math.min(ROWS, (int) Math.ceil(info.minHeight / Math.max(1f, cellH()))));
+            col.addView(widgetPickRow(c, names.get(info), cols + " x " + rows, iv, dp(110), new Runnable() {
+                public void run() { dlg[0].dismiss(); bindWidget(info); }
+            }));
+        }
+        dlg[0] = b.setTitle("Add widget").setView(sv).setNegativeButton("Cancel", null).show();
+    }
+
+    private View widgetPickRow(Context c, String name, String size, View preview, int previewH, final Runnable onAdd) {
+        LinearLayout row = new LinearLayout(c);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(4), dp(8), dp(4), dp(8));
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        plp.height = previewH;
+        if (preview instanceof ImageView) {
+            // keep the real shape of the widget preview but never taller than 200dp
+            ((ImageView) preview).setMaxHeight(dp(200));
+            plp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+        }
+        row.addView(preview, plp);
+        TextView t = new TextView(c);
+        t.setText(name + "   (" + size + ")");
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        t.setPadding(dp(4), dp(6), dp(4), 0);
+        row.addView(t);
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { onAdd.run(); }
+        });
+        return row;
     }
 
     private void bindWidget(AppWidgetProviderInfo info) {
