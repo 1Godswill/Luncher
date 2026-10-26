@@ -2,6 +2,27 @@ plugins { id 'com.android.application' }
 android {
     namespace 'com.camon18i.voltage'
     compileSdk 34
-    defaultConfig { applicationId 'com.camon18i.voltage'; minSdk 24; targetSdk 34; versionCode 11; versionName '3.8' }
+    defaultConfig { applicationId 'com.camon18i.voltage'; minSdk 24; targetSdk 34; versionCode 13; versionName '4.0' }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+
+    // One fixed signing key for every build, so each new APK installs over the old one.
+    // Keep feg-keystore.jks in the repo; never replace or delete it.
+    signingConfigs {
+        feg {
+            storeFile file('feg-keystore.jks')
+            storePassword 'fegLauncher2026'
+            keyAlias 'feg'
+            keyPassword 'fegLauncher2026'
+        }
+    }
+    buildTypes {
+        debug { signingConfig signingConfigs.feg }
+        release { signingConfig signingConfigs.feg }
+    }
+}
+
+dependencies {
+    // v4.0 app freezer: lets the launcher use Shizuku (found by name at run time, so the app still works without Shizuku installed)
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
 }

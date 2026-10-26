@@ -105,6 +105,7 @@ public class MainActivity extends Activity {
 
     static class App {
         String label, pkg, cls, key, iconName;
+        boolean frozen;                          // v4.0: in the app freezer
         int iconRank = 9;                        // how sure the icon match is: 0 exact ... 3 guess
         Bitmap plain;
         ComponentName cn;
@@ -170,7 +171,7 @@ public class MainActivity extends Activity {
     private Runnable badgeListener;
     private final List<BadgeRef> badgeRefs = new ArrayList<>();
     static class BadgeRef { TextView v; List<String> pkgs; }
-    static final String[] GESTURE_NAMES = {"Nothing", "App drawer", "Search", "Notifications", "Quick settings", "FEG Launcher settings", "Home menu", "Open an app..."};
+    static final String[] GESTURE_NAMES = {"Nothing", "App drawer", "Search", "Notifications", "Quick settings", "FEG Launcher settings", "Home menu", "Open an app...", "App freezer"};
     interface AppPick { void on(App a); }
     private LinearLayout searchExtras, drawerPagesBox;
     private PagerHSV drawerPager;
@@ -208,6 +209,10 @@ public class MainActivity extends Activity {
 
     // drag state
     private Item dragItem;
+    private int emptyRetries = 0;
+    private int builtDay = -1;               // the day the home screen was last built (the calendar icon shows the date)
+    private App dragDockApp;               // set while an icon is being dragged out of the dock
+    static final int MAX_DOCK = 6;
     private int dragIdx;
     private View dragView;
     private ImageView ghost;
@@ -231,6 +236,8 @@ public class MainActivity extends Activity {
     private final BroadcastReceiver pkgReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
             if (Intent.ACTION_PACKAGE_REMOVED.equals(i.getAction()) && i.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return;
+            if (Intent.ACTION_PACKAGE_REMOVED.equals(i.getAction()) && i.getData() != null)
+                Freezer.get(MainActivity.this).forget(i.getData().getSchemeSpecificPart());   // an uninstalled app leaves the freezer list
             reloadAll();
         }
     };
@@ -326,8 +333,13 @@ public class MainActivity extends Activity {
         try { host.startListening(); } catch (Exception ignored) {}
     }
 
+    private final Runnable refreezeRun = new Runnable() {
+        @Override public void run() { Freezer.get(MainActivity.this).refreezeThawed(null); }
+    };
+
     @Override protected void onPause() {
         resumed = false;
+        if (root != null) root.removeCallbacks(refreezeRun);
         stopFx();
         super.onPause();
     }
@@ -350,18 +362,67 @@ public class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         FegPlayerScreen.dismissCurrent();
+        FreezerScreen.dismissCurrent();
         try { unregisterReceiver(pkgReceiver); } catch (Exception ignored) {}
         try { unregisterReceiver(screenReceiver); } catch (Exception ignored) {}
         if (BadgeService.onChange == badgeListener) BadgeService.onChange = null;
         super.onDestroy();
     }
 
+    private static int todayKey() {
+        java.util.Calendar c = java.util.Calendar.getInstance();
+        return c.get(java.util.Calendar.YEAR) * 1000 + c.get(java.util.Calendar.DAY_OF_YEAR);
+    }
+
+    /** Once: asks to make FEG Launcher the default home app, which is what starts it every time the phone turns on. */
+    private void askDefaultHome() {
+        try {
+            if (prefs.getBoolean("ask_default_done", false) || isDefaultHome()) return;
+            prefs.edit().putBoolean("ask_default_done", true).apply();
+            new AlertDialog.Builder(this)
+                .setTitle("Start with the phone")
+                .setMessage("Make Feg Launcher your default home app so it opens by itself every time the phone is turned on.")
+                .setPositiveButton("Set as default", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int w) { openDefaultHomeSettings(); }
+                })
+                .setNegativeButton("Not now", null).show();
+        } catch (Throwable ignored) {}
+    }
+
+    private boolean isDefaultHome() {
+        Intent h = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+        android.content.pm.ResolveInfo ri = pm.resolveActivity(h, PackageManager.MATCH_DEFAULT_ONLY);
+        return ri != null && ri.activityInfo != null && getPackageName().equals(ri.activityInfo.packageName);
+    }
+
+    private void openDefaultHomeSettings() {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                android.app.role.RoleManager rm = (android.app.role.RoleManager) getSystemService(Context.ROLE_SERVICE);
+                if (rm != null && rm.isRoleAvailable(android.app.role.RoleManager.ROLE_HOME)) {
+                    startActivityForResult(rm.createRequestRoleIntent(android.app.role.RoleManager.ROLE_HOME), 4711);
+                    return;
+                }
+            }
+            startActivity(new Intent(Settings.ACTION_HOME_SETTINGS));
+        } catch (Throwable e) {
+            try { startActivity(new Intent(Settings.ACTION_SETTINGS)); } catch (Throwable ignored) {}
+        }
+    }
+
     @Override protected void onResume() {
         super.onResume();
-        rebuildHome(); // refreshes the calendar date
+        Freezer fzr = Freezer.get(this);
+        if (fzr.sync()) reloadAll();   // an app was switched on from outside: drop it from the freezer list
+        if (root != null) {
+            root.removeCallbacks(refreezeRun);
+            if (fzr.rule() == 1 && fzr.thawedCount() > 0) root.postDelayed(refreezeRun, 30000);   // back on the home screen: freeze awake apps again
+        }
+        if (builtDay != todayKey()) rebuildHome();   // a new day: refresh the calendar icon (otherwise keep the screen as it is, no flicker)
         if (hasFeg() && FegEngine.get(this).hasPermission()) FegEngine.get(this).loadLibrary(false);
         if (settings != null) settings.refreshBadgeStatus();
         requestBadgeRebind();
+        askDefaultHome();
         resumed = true;
         updateSaver();
         if (awayFlag) { awayFlag = false; animateReturn(); }
@@ -373,6 +434,7 @@ public class MainActivity extends Activity {
     @Override protected void onNewIntent(Intent i) {
         super.onNewIntent(i);
         FegPlayerScreen.dismissCurrent();
+        FreezerScreen.dismissCurrent();
         if (settingsOpen()) close();
         if (dragItem != null) endDrag();
         if (editWidget != null) exitWidgetEdit();
@@ -541,6 +603,26 @@ public class MainActivity extends Activity {
             byKey.put(a.key, a);
             infos.put(a.key, ri);
         }
+        // v4.0: a frozen app is switched off, so Android no longer lists it. Keep it in the launcher
+        // (home, folders, dock, search) so its place is not lost.
+        Freezer fz = Freezer.get(this);
+        for (App x : apps) x.frozen = fz.isFrozen(x.pkg);
+        for (String[] r : fz.records()) {
+            boolean listed = false;
+            for (App x : apps) if (x.pkg.equals(r[0])) { listed = true; break; }
+            if (listed || r[2] == null || !r[2].startsWith(r[0] + "/")) continue;
+            App fa = new App();
+            fa.pkg = r[0];
+            fa.cls = r[2].substring(r[0].length() + 1);
+            fa.key = r[2];
+            fa.cn = new ComponentName(fa.pkg, fa.cls);
+            fa.label = r[1];
+            fa.iconName = iconFor(fa.pkg, fa.cls);
+            fa.iconRank = lastRank;
+            fa.frozen = true;
+            apps.add(fa);
+            byKey.put(fa.key, fa);
+        }
         Collections.sort(apps, new Comparator<App>() {
             @Override public int compare(App x, App y) { return x.label.compareToIgnoreCase(y.label); }
         });
@@ -552,12 +634,18 @@ public class MainActivity extends Activity {
             }
             if (a.iconName == null) {
                 ResolveInfo ri = infos.get(a.key);
-                a.plain = iconStyle == IconStyler.CLAY ? composeIcon(ri)
-                        : IconStyler.tileFromDrawable(ri.loadIcon(pm), iconStyle);
+                Drawable fd = ri != null ? ri.loadIcon(pm) : Freezer.get(this).iconDrawable(a.pkg);
+                a.plain = iconStyle == IconStyler.CLAY ? composeIconD(fd)
+                        : IconStyler.tileFromDrawable(fd, iconStyle);
             }
         }
         buildDock();
-        if (apps.isEmpty() && !old.isEmpty()) return; // query failed: keep the saved layout untouched
+        if (apps.isEmpty()) {   // the phone's app list is not ready yet (right after boot): keep the saved layout and try again
+            if (emptyRetries++ < 10 && root != null)
+                root.postDelayed(new Runnable() { public void run() { reloadAll(); } }, 1500);
+            return;
+        }
+        emptyRetries = 0;
         loadItems();
         if (!drawerEnabled) addAllToHome();
     }
@@ -596,12 +684,17 @@ public class MainActivity extends Activity {
 
     /** Gives any app icon a clay / 3D feel: rounded body, puffy shading, thick slab and soft shadow. */
     private Bitmap composeIcon(ResolveInfo ri) {
+        Drawable d0 = null;
+        try { d0 = ri.loadIcon(pm); } catch (Exception ignored) {}
+        return composeIconD(d0);
+    }
+
+    private Bitmap composeIconD(final Drawable d) {
         final int S = 208, X = 24, Y = 14, DEPTH = 12;
         final float R = S * 0.28f;
         Bitmap face = Bitmap.createBitmap(S, S, Bitmap.Config.ARGB_8888);
         Canvas fc = new Canvas(face);
         try {
-            Drawable d = ri.loadIcon(pm);
             if (d != null) {
                 Path clip = new Path();
                 clip.addRoundRect(new RectF(0, 0, S, S), R, R, Path.Direction.CW);
@@ -704,11 +797,22 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void saveDock() {
+    private void persistDock() {
         StringBuilder sb = new StringBuilder();
         for (App a : dockApps) { if (sb.length() > 0) sb.append('\n'); sb.append(a.key); }
-        prefs.edit().putString("dock_apps", sb.toString()).apply();
+        prefs.edit().putString("dock_apps", sb.toString()).commit();
+    }
+
+    private void saveDock() {
+        persistDock();
         rebuildHome();
+    }
+
+    /** The dock holds as many icons as it has (3 to 6); dragging icons in or out changes that number. */
+    private void syncDockCount() {
+        dockCount = clampi(dockApps.size(), 3, MAX_DOCK);
+        prefs.edit().putInt("dock_count", dockCount).apply();
+        if (settings != null) settings.sync();
     }
 
     private void setDockSlot(int slot, App app) {
@@ -765,7 +869,7 @@ public class MainActivity extends Activity {
     }
 
     private void dockMenu(final App a) {
-        final String[] arr = {"Replace...", "Remove from dock", "App info", "Uninstall"};
+        final String[] arr = {"Replace...", "Remove from dock", "App info", "Uninstall", a.frozen ? "Unfreeze app" : "Freeze app"};
         new AlertDialog.Builder(this).setTitle(a.label).setItems(arr, new DialogInterface.OnClickListener() {
             @Override public void onClick(DialogInterface d, int w) {
                 if (w == 0) {
@@ -773,7 +877,9 @@ public class MainActivity extends Activity {
                     pickApp("Replace " + a.label, new AppPick() { public void on(App n) { setDockSlot(slot, n); } });
                 } else if (w == 1) removeFromDock(a);
                 else if (w == 2) appInfo(a);
-                else uninstall(a);
+                else if (w == 3) uninstall(a);
+                else if (a.frozen) unfreezeOne(a);
+                else freezeOne(a);
             }
         }).show();
     }
@@ -798,6 +904,9 @@ public class MainActivity extends Activity {
     private void loadItems() {
         items.clear();
         String json = prefs.getString("layout", null);
+        if (json != null) {
+            try { new JSONArray(json); } catch (JSONException bad) { json = prefs.getString("layout_bak", null); }
+        }
         if (json != null) {
             try {
                 JSONArray arr = new JSONArray(json);
@@ -894,7 +1003,10 @@ public class MainActivity extends Activity {
                 arr.put(o);
             } catch (JSONException ignored) {}
         }
-        prefs.edit().putString("layout", arr.toString()).apply();
+        String now = arr.toString(), prev = prefs.getString("layout", null);
+        SharedPreferences.Editor ed = prefs.edit().putString("layout", now);
+        if (prev != null && !prev.equals(now) && prev.length() > 2) ed.putString("layout_bak", prev);
+        ed.commit();   // written to disk right away so a sudden stop cannot lose the layout
     }
 
     private boolean onHome(String key) {
@@ -995,6 +1107,9 @@ public class MainActivity extends Activity {
         });
         pager.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
             @Override public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+                // the home grid must always match the real width of the window (split screen, floating window, display size change)
+                int nw = r - l;
+                if (nw > 0 && nw != screenW) { screenW = nw; pager.post(rebuildRun); return; }
                 if ((b - t) != (ob - ot) && (b - t) > 0) pager.post(rebuildRun);
             }
         });
@@ -1126,6 +1241,7 @@ public class MainActivity extends Activity {
             @Override public void close() { MainActivity.this.close(); }
             @Override public void addWidget() { MainActivity.this.close(); pickWidget(); }
             @Override public void chooseDock() { editDock(); }
+            @Override public void openFreezer() { MainActivity.this.close(); showFreezer(); }
             @Override public String gestureLabel(String k, int d) { return MainActivity.this.gestureLabel(k, d); }
             @Override public void chooseGesture(String k, int d, Runnable done) { MainActivity.this.chooseGesture(k, d, done); }
             @Override public boolean badgeAccess() { return MainActivity.this.badgeAccess(); }
@@ -1201,8 +1317,33 @@ public class MainActivity extends Activity {
             }
             v = iv;
         }
+        if (a.frozen) v = frostOverlay(v);
         v.setLayoutParams(new LinearLayout.LayoutParams(size, size));
         return v;
+    }
+
+    /** v4.0: a frozen app shows a slightly faded icon with a small snowflake. */
+    private View frostOverlay(View icon) {
+        FrameLayout f = new FrameLayout(this);
+        f.setClipChildren(false);
+        icon.setAlpha(0.62f);
+        f.addView(icon, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        TextView sn = new TextView(this);
+        sn.setText("\u2744");
+        sn.setTextColor(Color.WHITE);
+        sn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        sn.setGravity(Gravity.CENTER);
+        sn.setIncludeFontPadding(false);
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(0xFF2F8DEB);
+        g.setCornerRadius(dp(10));
+        sn.setBackground(g);
+        sn.setElevation(dp(2 + fxDepth * 0.10f) + dp(8));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(18), dp(18), Gravity.BOTTOM | Gravity.START);
+        lp.leftMargin = dp(2);
+        lp.bottomMargin = dp(2);
+        f.addView(sn, lp);
+        return f;
     }
 
     private View makeCellWith(View icon, String label) { return makeCellWith(icon, label, Color.WHITE); }
@@ -1437,10 +1578,13 @@ public class MainActivity extends Activity {
         }
 
         for (final Item it : items) {
-            addHomeItem(pages.get(it.page), it, cw, ch, pad, false);
-            if (loop && it.page == pageCount - 1) addHomeItem(cloneLast, it, cw, ch, pad, true);
-            if (loop && it.page == 0) addHomeItem(cloneFirst, it, cw, ch, pad, true);
+            try {
+                addHomeItem(pages.get(it.page), it, cw, ch, pad, false);
+                if (loop && it.page == pageCount - 1) addHomeItem(cloneLast, it, cw, ch, pad, true);
+                if (loop && it.page == 0) addHomeItem(cloneFirst, it, cw, ch, pad, true);
+            } catch (Throwable bad) { android.util.Log.e("FEG", "could not draw an item", bad); }
         }
+        builtDay = todayKey();
 
         pager.setPages(pageCount, screenW, loop);
         try { if (wpm != null) wpm.setWallpaperOffsetSteps(pageCount > 1 ? 1f / (pageCount - 1) : 1f, 1f); } catch (Exception ignored) {}
@@ -1452,7 +1596,7 @@ public class MainActivity extends Activity {
             View cell = makeDockCell(a);
             cell.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { launch(a, v); } });
             cell.setOnLongClickListener(new View.OnLongClickListener() {
-                @Override public boolean onLongClick(View v) { dockMenu(a); return true; }
+                @Override public boolean onLongClick(View v) { startDockDrag(a, v); return true; }
             });
             dock.addView(cell, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         }
@@ -1515,7 +1659,7 @@ public class MainActivity extends Activity {
         } else {
             View hv;
             if (feg) {
-                hv = new FegPlayerView(this, it.h);
+                hv = new FegPlayerView(this, it.h, wpx, hpx);
             } else {
                 AppWidgetHostView ahv;
                 try { ahv = host.createView(this, it.wid, info); } catch (Exception e) { return; }
@@ -1760,6 +1904,94 @@ public class MainActivity extends Activity {
     }
 
     private void doLaunch(App a, View from) {
+        if (a.frozen) { launchFrozen(a, from); return; }
+        startPlain(a, from);
+    }
+
+    /** v4.0: a frozen app is switched on for a moment, started, and frozen again later. It stays in the freezer list. */
+    private void launchFrozen(final App a, final View from) {
+        final Freezer fz = Freezer.get(this);
+        if (!fz.needsThaw(a.pkg)) {
+            if (fz.isFrozen(a.pkg) && !fz.isSoft(a.pkg)) fz.thawForLaunch(a.pkg, null);   // already awake: make sure it is frozen again later
+            startPlain(a, from);
+            return;
+        }
+        toast("Waking " + a.label + "...");
+        fz.thawForLaunch(a.pkg, new Freezer.Done() {
+            @Override public void done(boolean ok, String msg) {
+                if (ok) startAfterThaw(a, 3); else toast(msg);
+            }
+        });
+    }
+
+    private void startAfterThaw(final App a, final int tries) {
+        Intent i = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                .setComponent(a.cn).setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+        try {
+            startActivity(i);
+        } catch (Exception e) {
+            if (tries > 0 && root != null) {
+                root.postDelayed(new Runnable() { public void run() { startAfterThaw(a, tries - 1); } }, 400);
+            } else {
+                toast("Can't open " + a.label);
+            }
+            return;
+        }
+        if (drawerOpen && root != null) root.postDelayed(new Runnable() { public void run() { hideDrawerNow(); } }, 350);
+    }
+
+    private void freezeOne(final App a) {
+        if (Freezer.get(this).isSystemApp(a.pkg)) {
+            new AlertDialog.Builder(this).setTitle("Freeze " + a.label + "?")
+                    .setMessage("This is a system app. Freezing it can break phone features. You can unfreeze it any time in App freezer.")
+                    .setPositiveButton("Freeze", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) { doFreezeOne(a); }
+                    }).setNegativeButton("Cancel", null).show();
+        } else {
+            doFreezeOne(a);
+        }
+    }
+
+    private void doFreezeOne(App a) {
+        List<String[]> t = new ArrayList<>();
+        t.add(new String[]{a.pkg, a.label, a.key});
+        toast("Freezing " + a.label + "...");
+        Freezer.get(this).freeze(t, new Freezer.Done() {
+            @Override public void done(boolean ok, String msg) { toast(msg); reloadAll(); }
+        });
+    }
+
+    private void unfreezeOne(App a) {
+        List<String> p = new ArrayList<>();
+        p.add(a.pkg);
+        Freezer.get(this).unfreeze(p, new Freezer.Done() {
+            @Override public void done(boolean ok, String msg) { toast(msg); reloadAll(); }
+        });
+    }
+
+    private void showFreezer() {
+        if (drawerOpen) hideDrawerNow();
+        if (editWidget != null) exitWidgetEdit();
+        FreezerScreen.show(this, new FreezerScreen.Host() {
+            @Override public void launch(String pkg, String key, String label) {
+                App a = byKey.get(key);
+                if (a == null) {
+                    a = new App();
+                    a.pkg = pkg;
+                    a.key = key;
+                    a.cls = key != null && key.startsWith(pkg + "/") ? key.substring(pkg.length() + 1) : "";
+                    if (a.cls.length() == 0) { toast("Can't open " + label); return; }
+                    a.cn = new ComponentName(pkg, a.cls);
+                    a.label = label;
+                    a.frozen = Freezer.get(MainActivity.this).isFrozen(pkg);
+                }
+                MainActivity.this.launch(a, null);
+            }
+            @Override public void changed() { reloadAll(); }
+        });
+    }
+
+    private void startPlain(App a, View from) {
         Intent i = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
                 .setComponent(a.cn).setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
         try {
@@ -1791,6 +2023,8 @@ public class MainActivity extends Activity {
         if (fromHome) list.add("Remove from home");
         if (fromDrawer) list.add("Hide app");
         if ((fromDrawer || fromHome) && !dockApps.contains(a)) list.add("Add to dock");
+        if (a.frozen) list.add("Unfreeze app");
+        else if (!Freezer.get(this).isProtected(a.pkg)) list.add("Freeze app");
         list.add("App info");
         list.add("Uninstall");
         final String[] arr = list.toArray(new String[0]);
@@ -1801,6 +2035,8 @@ public class MainActivity extends Activity {
                 else if (s.equals("Add to home screen")) pin(a);
                 else if (s.equals("Hide app")) hideApp(a);
                 else if (s.startsWith("Remove")) unpin(a);
+                else if (s.equals("Freeze app")) freezeOne(a);
+                else if (s.equals("Unfreeze app")) unfreezeOne(a);
                 else if (s.equals("App info")) appInfo(a);
                 else uninstall(a);
             }
@@ -1808,13 +2044,14 @@ public class MainActivity extends Activity {
     }
 
     private void homeMenu() {
-        final String[] arr = {"FEG Launcher settings", "Add widget", drawerEnabled ? "Open all apps" : "Search", "Phone settings"};
+        final String[] arr = {"FEG Launcher settings", "Add widget", drawerEnabled ? "Open all apps" : "Search", "App freezer", "Phone settings"};
         new AlertDialog.Builder(this).setItems(arr, new DialogInterface.OnClickListener() {
             @Override public void onClick(DialogInterface d, int w) {
                 try {
                     if (w == 0) openSettings();
                     else if (w == 1) pickWidget();
                     else if (w == 2) openDrawer();
+                    else if (w == 3) showFreezer();
                     else startActivity(new Intent(Settings.ACTION_SETTINGS));
                 } catch (Exception e) { Toast.makeText(MainActivity.this, "Not available", Toast.LENGTH_SHORT).show(); }
             }
@@ -2601,6 +2838,7 @@ public class MainActivity extends Activity {
             case 4: expandQuickSettings(); break;
             case 5: openSettings(); break;
             case 6: homeMenu(); break;
+            case 8: showFreezer(); break;
             case 7: {
                 App a = byKey.get(prefs.getString(key + "_app", ""));
                 if (a != null) launch(a, null); else toast("No app chosen for this gesture");
@@ -2693,6 +2931,9 @@ public class MainActivity extends Activity {
         tRemove.setBackgroundColor(t == 1 ? 0x66FFFFFF : 0);
         tInfo.setBackgroundColor(t == 2 ? 0x66FFFFFF : 0);
         tUninstall.setBackgroundColor(t == 3 ? 0x66FFFFFF : 0);
+        boolean overDock = t == 0 && dragItem.type == T_APP && dockUnder();
+        dock.setScaleX(overDock ? 1.04f : 1f);
+        dock.setScaleY(overDock ? 1.10f : 1f);
         int dir = lastX < dp(36) ? -1 : (lastX > screenW - dp(36) ? 1 : 0);
         if (dir != edgeDir) {
             edgeDir = dir;
@@ -2712,27 +2953,97 @@ public class MainActivity extends Activity {
         tUninstall.setBackgroundColor(0);
         dragItem = null;
         dragView = null;
+        dragDockApp = null;
+        dock.setScaleX(1f);
+        dock.setScaleY(1f);
     }
 
     private void dragDrop() {
         final Item it = dragItem;
+        final App dockApp = dragDockApp;
         boolean moved = Math.hypot(lastX - dragStartX, lastY - dragStartY) > dp(12);
         int tgt = targetUnder();
-        float[] cell = moved ? locateCell() : null;
+        boolean overDock = moved && tgt == 0 && it.type == T_APP && dockUnder();
+        int slot = overDock ? dockSlotAt() : -1;
+        float[] cell = (moved && !overDock) ? locateCell() : null;
         endDrag();
 
-        if (tgt == 1) { removeItem(it); return; }
-        App a = it.type == T_APP ? byKey.get(it.key) : null;
+        if (tgt == 1) { if (dockApp != null) removeFromDock(dockApp); else removeItem(it); return; }
+        App a = dockApp != null ? dockApp : (it.type == T_APP ? byKey.get(it.key) : null);
         if (tgt == 2 && a != null) { appInfo(a); return; }
         if (tgt == 3 && a != null) { uninstall(a); return; }
         if (!moved) {
-            if (a != null) appMenu(a, false, true);
+            if (dockApp != null) dockMenu(dockApp);
+            else if (a != null) appMenu(a, false, true);
             else if (it.type == T_FOLDER) folderMenu(it);
             else if (it.type == T_WIDGET) enterWidgetEdit(it);
             return;
         }
+        if (overDock && a != null) { dropOnDock(it, a, dockApp != null, slot); return; }
         if (cell == null) return; // dropped outside the grid: nothing changes
+        if (dockApp != null) { dockToHome(dockApp, cell); return; }
         dropOnGrid(it, (int) cell[0], (int) cell[1], (int) cell[2], cell[3], cell[4]);
+    }
+
+    // ---- dragging icons into, out of and inside the dock
+
+    private void startDockDrag(App a, View v) {
+        dragDockApp = a;
+        startDrag(appItem(a.key), v);
+    }
+
+    /** Is the finger over the dock (with a little slack above it)? */
+    private boolean dockUnder() {
+        if (dock == null || dock.getVisibility() != View.VISIBLE) return false;
+        int[] l = new int[2];
+        dock.getLocationOnScreen(l);
+        return lastY >= l[1] - dp(8) && lastY <= l[1] + dock.getHeight() + dp(24);
+    }
+
+    /** Which position in the dock the finger is at (0 = first). */
+    private int dockSlotAt() {
+        int slot = 0;
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View c = dock.getChildAt(i);
+            int[] l = new int[2];
+            c.getLocationOnScreen(l);
+            if (lastX > l[0] + c.getWidth() / 2f) slot = i + 1;
+        }
+        return slot;
+    }
+
+    private void dropOnDock(Item it, App a, boolean fromDock, int slot) {
+        List<App> l = new ArrayList<>(dockApps);
+        if (fromDock) {                                   // reorder inside the dock
+            int old = l.indexOf(a);
+            if (old < 0) return;
+            l.remove(old);
+            if (slot > old) slot--;
+            l.add(Math.max(0, Math.min(l.size(), slot)), a);
+            dockApps.clear();
+            dockApps.addAll(l);
+            saveDock();
+            return;
+        }
+        if (l.contains(a)) { toast(a.label + " is already in the dock"); return; }
+        if (l.size() >= MAX_DOCK) { toast("The dock is full (" + MAX_DOCK + " icons). Drag one out first."); return; }
+        l.add(Math.max(0, Math.min(l.size(), slot)), a);  // home -> dock
+        items.remove(it);
+        dockApps.clear();
+        dockApps.addAll(l);
+        saveItems();
+        syncDockCount();
+        saveDock();
+    }
+
+    private void dockToHome(App a, float[] cell) {
+        if (dockApps.size() <= 3) { toast("The dock keeps at least 3 icons. Drag another app in first."); return; }
+        Item n = appItem(a.key);
+        items.add(n);
+        dockApps.remove(a);
+        persistDock();
+        syncDockCount();
+        dropOnGrid(n, (int) cell[0], (int) cell[1], (int) cell[2], cell[3], cell[4]);
     }
 
     /** Returns {page, row, col, fracX, fracY} for the finger position, or null if outside the page area. */
@@ -2893,7 +3204,7 @@ public class MainActivity extends Activity {
     }
 
     private void folderAppMenu(final Dialog dlg, final Item f, final App a) {
-        final String[] arr = {"Move out of folder", "App info", "Uninstall"};
+        final String[] arr = {"Move out of folder", "App info", "Uninstall", a.frozen ? "Unfreeze app" : "Freeze app"};
         new AlertDialog.Builder(this).setTitle(a.label).setItems(arr, new DialogInterface.OnClickListener() {
             @Override public void onClick(DialogInterface d, int w) {
                 if (w == 0) {
@@ -2911,7 +3222,9 @@ public class MainActivity extends Activity {
                     dlg.dismiss();
                     if (items.contains(f)) showFolder(f);
                 } else if (w == 1) appInfo(a);
-                else uninstall(a);
+                else if (w == 2) uninstall(a);
+                else if (a.frozen) unfreezeOne(a);
+                else freezeOne(a);
             }
         }).show();
     }
@@ -3121,6 +3434,7 @@ public class MainActivity extends Activity {
         String s = q.trim().toLowerCase();
         boolean searchOnly = !drawerEnabled;
         for (App a : apps) {
+            if (a.frozen && s.isEmpty()) continue;   // frozen apps stay out of the drawer; search still finds them
             boolean hid = hiddenPkgs.contains(a.pkg) && (s.isEmpty() || hideSearch);
             if (!hid && (s.isEmpty() ? !searchOnly : a.label.toLowerCase().contains(s))) shown.add(a);
         }
